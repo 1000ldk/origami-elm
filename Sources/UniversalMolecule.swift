@@ -1,0 +1,455 @@
+// UniversalMolecule.swift
+// Lang's universal molecule for a convex axial polygon, computed by insetting.
+//
+// THE CONSTRUCTION
+//
+// An *axial polygon* is a face of the active-path subdivision all of whose sides are
+// active paths: side (i, i+1) has length exactly m * d_T(node_i, node_j), and every
+// diagonal satisfies |p_i - p_j| >= m * d_T(i, j).  Such a polygon is the base of one
+// "cone" of the uniaxial base, and the molecule is the crease pattern that fills it.
+//
+// Inset the polygon by t: every side moves inward by t, so vertex i slides along the
+// angle bisector b_i, chosen so that b_i . n_(i-1) = b_i . n_i = 1 with n the inward
+// unit normals.  Write c_i = b_i . e_i, with e_i the unit direction of side i; then
+// |b_i| = 1 / sin(alpha_i / 2) and c_i = cot(alpha_i / 2).
+//
+// A point q on the ridge from p_i at inset t is at elevation t in the folded base, and
+// |p_i - q| = t / sin(alpha_i / 2).  In the folded base that same distance is the
+// hypotenuse of (horizontal m*delta, vertical t), so
+//
+//        m * delta_i(t) = t * cot(alpha_i / 2) = t * c_i
+//
+// which says: **vertex i consumes tree length at rate c_i / m per unit inset.**  Hence
+// every required distance decays linearly,
+//
+//        R_ij(t) = R_ij(0) - t * (c_i + c_j),
+//
+// and because the offset of a side shrinks at exactly the rate c_i + c_(i+1), the
+// identity |p_i(t) - p_j(t)| == R_ij(t) is preserved for adjacent pairs.  That identity
+// is the algorithm's invariant, and it is re-checked at the top of every recursion: if
+// it ever fails, the face is one whose reduction is not driven by contraction alone and
+// needs the general river molecule, which is reported rather than faked.
+//
+// EVENTS
+//   contraction: a side reaches zero length -- two adjacent vertices merge, the ridge
+//                traces meet, and a hinge crease drops from the meeting point
+//                perpendicular to the side's *base* segment.
+//   splitting:   a non-adjacent pair reaches |p_i - p_j| == R_ij -- a gusset (river)
+//                appears.  Detected exactly, and reported: splitting the polygon into
+//                two independent sub-polygons is NOT correct in general, because the two
+//                sub-molecules then drop their hinges onto the new edge at different
+//                points (they correspond to different branch nodes of the tree), which
+//                produces odd-degree vertices.  See README.
+//
+// Specialising the loop: a triangle collapses to its incentre in one event -- the rabbit
+// ear -- and a square to its centre -- the preliminary-base molecule.  Both are recovered
+// exactly, so this file subsumes the tangential-polygon molecule it replaces.
+
+import Foundation
+
+enum UM {
+
+    // MARK: - small vector helpers
+
+    static func sub(_ a: Point, _ b: Point) -> Point { Point(x: a.x - b.x, y: a.y - b.y) }
+    static func add(_ a: Point, _ b: Point) -> Point { Point(x: a.x + b.x, y: a.y + b.y) }
+    static func mul(_ a: Point, _ s: Double) -> Point { Point(x: a.x * s, y: a.y * s) }
+    static func dot(_ a: Point, _ b: Point) -> Double { a.x * b.x + a.y * b.y }
+    static func crs(_ a: Point, _ b: Point) -> Double { a.x * b.y - a.y * b.x }
+    static func len(_ a: Point) -> Double { (a.x * a.x + a.y * a.y).squareRoot() }
+    static func fmt(_ v: Double) -> String { String(format: "%.6f", v) }
+
+    /// Foot of the perpendicular from `z` onto the line through `a` and `b`.
+    static func foot(_ z: Point, _ a: Point, _ b: Point) -> Point {
+        let d = sub(b, a)
+        let dd = dot(d, d)
+        if dd < 1e-18 { return a }
+        return add(a, mul(d, dot(sub(z, a), d) / dd))
+    }
+
+    /// Offset direction b_i (unit rate against both adjacent sides) and the consumption
+    /// rate c_i = b_i . e_i = cot(alpha_i / 2) for every vertex of a CCW polygon.
+    static func bisectors(_ p: [Point]) -> (b: [Point], c: [Double])? {
+        let n = p.count
+        guard n >= 3 else { return nil }
+        var nrm: [Point] = []
+        var dir: [Point] = []
+        for i in 0..<n {
+            let d = sub(p[(i + 1) % n], p[i])
+            let l = len(d)
+            if l < 1e-12 { return nil }
+            nrm.append(Point(x: -d.y / l, y: d.x / l))
+            dir.append(mul(d, 1 / l))
+        }
+        var bs: [Point] = []
+        var cs: [Double] = []
+        for i in 0..<n {
+            let a = nrm[(i - 1 + n) % n], b = nrm[i]
+            let det = a.x * b.y - a.y * b.x
+            // parallel sides: the vertex is straight through, so it travels along the
+            // common normal and consumes nothing (cot(90 deg) = 0)
+            let bi = abs(det) < 1e-12 ? a
+                                      : Point(x: (b.y - a.y) / det, y: (a.x - b.x) / det)
+            bs.append(bi)
+            cs.append(dot(bi, dir[i]))
+        }
+        return (bs, cs)
+    }
+
+    /// Convex, allowing collinear vertices (a leaf sitting inside an active path) but
+    /// rejecting reflex ones, for which the inset is not defined.
+    static func isConvex(_ p: [Point]) -> Bool {
+        let n = p.count
+        guard n >= 3 else { return false }
+        for i in 0..<n {
+            let a = p[(i - 1 + n) % n], b = p[i], c = p[(i + 1) % n]
+            if crs(sub(b, a), sub(c, b)) < -1e-12 { return false }
+        }
+        return true
+    }
+
+    /// Smallest t > 0 with |u + t w| == K - c t, or nil.
+    static func splitTime(u: Point, w: Point, K: Double, c: Double) -> Double? {
+        let qa = dot(w, w) - c * c
+        let qb = 2 * (dot(u, w) + K * c)
+        let qc = dot(u, u) - K * K
+        var roots: [Double] = []
+        if abs(qa) < 1e-14 {
+            if abs(qb) > 1e-14 { roots = [-qc / qb] }
+        } else {
+            let disc = qb * qb - 4 * qa * qc
+            if disc >= 0 {
+                let s = disc.squareRoot()
+                roots = [(-qb - s) / (2 * qa), (-qb + s) / (2 * qa)]
+            }
+        }
+        var best: Double? = nil
+        for t in roots where t > 1e-7 && K - c * t >= -1e-9 {
+            best = (best == nil) ? t : Swift.min(best!, t)
+        }
+        return best
+    }
+
+    // MARK: - the inset recursion
+
+    /// `R[k][l]` is the required paper distance between polygon positions k and l.
+    /// `base[i]` is the segment side i was born on, so a hinge always drops to the
+    /// original axial edge rather than to the current inset line.
+    static func inset(pts: [Point], base: [(Point, Point)], R: [[Double]],
+                      depth: Int, into creases: inout [Crease]) -> (ok: Bool, reason: String) {
+        let n = pts.count
+        if n < 3 { return (true, "") }
+        if depth > 64 { return (false, "the inset did not terminate within 64 events") }
+        guard isConvex(pts) else {
+            return (false, "the reduced polygon is reflex; the universal molecule is defined for convex axial polygons")
+        }
+        guard let (bs, cs) = bisectors(pts) else {
+            return (false, "the reduced polygon has a degenerate side")
+        }
+
+        // Invariant: every side of the reduced polygon is still exactly its reduced tree
+        // path.  Failure means a river/gusset is needed, not that the geometry is wrong.
+        for i in 0..<n {
+            let j = (i + 1) % n
+            let g = len(sub(pts[i], pts[j]))
+            if abs(g - R[i][j]) > 1e-7 {
+                return (false, "reduced side \(i)-\(j) measures \(fmt(g)) but its reduced tree path is \(fmt(R[i][j])); the contraction is not tree-consistent, so this face needs a river (gusset) molecule, which is not implemented")
+            }
+        }
+
+        var tBest = Double.infinity
+        var kind = ""
+        var ev = (0, 0)
+        for i in 0..<n {
+            let j = (i + 1) % n
+            let rate = cs[i] + cs[j]
+            if rate > 1e-9 {
+                let t = R[i][j] / rate
+                if t < tBest - 1e-12 { tBest = t; kind = "contract"; ev = (i, j) }
+            }
+        }
+        for i in 0..<n {
+            for j in (i + 1)..<n where (j - i) % n != 1 && (i - j + n) % n != 1 {
+                if let t = splitTime(u: sub(pts[i], pts[j]), w: sub(bs[i], bs[j]),
+                                     K: R[i][j], c: cs[i] + cs[j]), t < tBest - 1e-9 {
+                    tBest = t; kind = "split"; ev = (i, j)
+                }
+            }
+        }
+
+        if kind.isEmpty || !tBest.isFinite || tBest < -1e-9 {
+            return (false, "the inset has no next event; the face cannot be reduced")
+        }
+        if kind == "split" {
+            return (false, "a gusset (river) event occurs at inset \(fmt(tBest)), between reduced vertices \(ev.0) and \(ev.1), before any side contracts; the general river molecule is not implemented")
+        }
+
+        var moved: [Point] = []
+        for i in 0..<n { moved.append(add(pts[i], mul(bs[i], tBest))) }
+        for i in 0..<n where len(sub(pts[i], moved[i])) > 1e-12 {
+            creases.append(Crease(a: pts[i], b: moved[i], fold: .mountain, note: "ridge"))
+        }
+        var rr = R
+        for a in 0..<n {
+            for b in 0..<n where a != b { rr[a][b] -= tBest * (cs[a] + cs[b]) }
+        }
+
+        // group maximal runs of vertices that have just become coincident
+        var groups: [[Int]] = []
+        var used = [Bool](repeating: false, count: n)
+        for i in 0..<n where !used[i] {
+            var g = [i]
+            used[i] = true
+            var k = (i + 1) % n
+            while k != i && !used[k] && len(sub(moved[k], moved[g[g.count - 1]])) < 1e-9 {
+                g.append(k)
+                used[k] = true
+                k = (k + 1) % n
+            }
+            groups.append(g)
+        }
+        // a run that wraps past index 0 comes out as two groups; join them
+        if groups.count > 1 {
+            let lastGroup = groups[groups.count - 1]
+            if len(sub(moved[lastGroup[lastGroup.count - 1]], moved[groups[0][0]])) < 1e-9 {
+                groups.removeLast()
+                groups[0] = lastGroup + groups[0]
+            }
+        }
+
+        let heads = groups.map { moved[$0[0]] }
+        let collapsed = heads.allSatisfy { len(sub($0, heads[0])) < 1e-9 }
+        if collapsed {
+            // the whole polygon has come to a point: every side gets its hinge
+            let z = heads[0]
+            for i in 0..<n {
+                creases.append(Crease(a: z, b: foot(z, base[i].0, base[i].1),
+                                      fold: .valley, note: "hinge"))
+            }
+            return (true, "")
+        }
+        if groups.count == n {
+            return (false, "the contraction event at inset \(fmt(tBest)) merged no vertices")
+        }
+        if groups.count < 3 {
+            return (false, "the inset collapsed onto a segment rather than a point; this face needs a river (gusset) molecule")
+        }
+
+        var keep: [Int] = []
+        var nextBase: [(Point, Point)] = []
+        for g in groups {
+            let z = moved[g[0]]
+            // every side strictly inside the group has vanished here
+            for k in 0..<(g.count - 1) {
+                creases.append(Crease(a: z, b: foot(z, base[g[k]].0, base[g[k]].1),
+                                      fold: .valley, note: "hinge"))
+            }
+            keep.append(g[0])
+            nextBase.append(base[g[g.count - 1]])
+        }
+
+        var nextPts: [Point] = []
+        var nextR = [[Double]](repeating: [Double](repeating: 0, count: keep.count),
+                               count: keep.count)
+        for (a, ka) in keep.enumerated() {
+            nextPts.append(moved[ka])
+            for (b, kb) in keep.enumerated() where a != b { nextR[a][b] = rr[ka][kb] }
+        }
+        return inset(pts: nextPts, base: nextBase, R: nextR, depth: depth + 1, into: &creases)
+    }
+
+    // MARK: - entry point
+
+    /// Universal molecule of one axial polygon.  `required[i][j]` is m * d_T between the
+    /// tree nodes of vertices i and j.  On failure no creases are returned and `reason`
+    /// says precisely what the face would need.
+    static func molecule(polygon: [Point], required: [[Double]])
+        -> (creases: [Crease], ok: Bool, reason: String) {
+        let n = polygon.count
+        guard n >= 3, required.count == n else { return ([], false, "malformed polygon") }
+        var base: [(Point, Point)] = []
+        for i in 0..<n { base.append((polygon[i], polygon[(i + 1) % n])) }
+        var creases: [Crease] = []
+        let r = inset(pts: polygon, base: base, R: required, depth: 0, into: &creases)
+        return (r.ok ? creases : [], r.ok, r.reason)
+    }
+
+    /// Check that a face really is an axial polygon before trying to fill it.
+    /// Returns nil when it is, or the reason it is not.
+    static func axialViolation(polygon: [Point], required: [[Double]]) -> String? {
+        let n = polygon.count
+        for i in 0..<n {
+            let j = (i + 1) % n
+            let g = len(sub(polygon[i], polygon[j]))
+            if abs(g - required[i][j]) > 1e-6 {
+                return "side \(i)-\(j) is \(fmt(g)) long but the tree path between its ends is \(fmt(required[i][j])); the side is not an active path"
+            }
+        }
+        for i in 0..<n {
+            for j in (i + 1)..<n where (j - i) % n != 1 && (i - j + n) % n != 1 {
+                let g = len(sub(polygon[i], polygon[j]))
+                if g < required[i][j] - 1e-6 {
+                    return "diagonal \(i)-\(j) is \(fmt(g)) but the tree requires at least \(fmt(required[i][j]))"
+                }
+            }
+        }
+        return nil
+    }
+}
+
+// MARK: - self-test
+
+extension UM {
+
+    /// Cases with known answers, so a build can be checked without a repository.
+    /// Run with `origami --self-test`.
+    static func selfTest() -> [(name: String, ok: Bool, detail: String)] {
+        var out: [(name: String, ok: Bool, detail: String)] = []
+
+        func requiredMatrix(_ n: Int, _ f: (Int, Int) -> Double) -> [[Double]] {
+            var r = [[Double]](repeating: [Double](repeating: 0, count: n), count: n)
+            for i in 0..<n {
+                for j in 0..<n where i != j { r[i][j] = f(i, j) }
+            }
+            return r
+        }
+
+        /// Degree of every crease endpoint strictly inside `poly`, counting the odd ones.
+        /// `Molecule.hingeMismatches` cannot be used here: it treats the unit square as the
+        /// paper, and these test polygons are not inside it.
+        func oddDegreeInside(_ creases: [Crease], _ poly: [Point]) -> Int {
+            let n = poly.count
+            func strictlyInside(_ q: Point) -> Bool {
+                for i in 0..<n {
+                    if crs(sub(poly[(i + 1) % n], poly[i]), sub(q, poly[i])) <= 1e-9 { return false }
+                }
+                return true
+            }
+            var pts: [Point] = []
+            for c in creases {
+                for q in [c.a, c.b] where strictlyInside(q) {
+                    if !pts.contains(where: { len(sub($0, q)) < 1e-9 }) { pts.append(q) }
+                }
+            }
+            var odd = 0
+            for v in pts {
+                var deg = 0
+                for c in creases where len(sub(c.a, v)) < 1e-9 || len(sub(c.b, v)) < 1e-9 { deg += 1 }
+                if deg % 2 == 1 { odd += 1 }
+            }
+            return odd
+        }
+
+        func run(_ name: String, _ poly: [Point], _ req: [[Double]],
+                 expectFill: Bool, expectEvents: Int?, expectCentre: Point?) {
+            if let bad = axialViolation(polygon: poly, required: req) {
+                out.append((name, false, "not an axial polygon to begin with: \(bad)"))
+                return
+            }
+            let m = molecule(polygon: poly, required: req)
+            if !expectFill {
+                out.append((name, !m.ok, m.ok ? "was filled, but should have been refused"
+                                              : "refused as expected — \(m.reason)"))
+                return
+            }
+            guard m.ok else {
+                out.append((name, false, "refused: \(m.reason)"))
+                return
+            }
+            var detail = "\(m.creases.count) creases"
+            var ok = true
+            if let c = expectCentre {
+                let hit = m.creases.contains { len(sub($0.a, c)) < 1e-6 || len(sub($0.b, c)) < 1e-6 }
+                if !hit { ok = false; detail += "; expected a crease at (\(fmt(c.x)), \(fmt(c.y)))" }
+            }
+            if let e = expectEvents, m.creases.count != e {
+                ok = false
+                detail += "; expected \(e) creases"
+            }
+            // every vertex strictly inside the polygon must have even degree, or no flat
+            // folding exists no matter how the creases are assigned
+            let odd = oddDegreeInside(Molecule.splitAtPoints(m.creases), poly)
+            if odd > 0 { ok = false; detail += "; \(odd) odd-degree interior vertex/vertices" }
+            out.append((name, ok, detail))
+        }
+
+        // 1. equilateral triangle: three leaves of length 1 on a common node, m = 1.
+        //    Expect the rabbit ear -- 3 ridges to the incentre and 3 hinges.
+        let s = 2.0
+        let tri = [Point(x: 0, y: 0), Point(x: s, y: 0),
+                   Point(x: s / 2, y: s * (3.0).squareRoot() / 2)]
+        run("rabbit ear (equilateral triangle)", tri, requiredMatrix(3) { _, _ in 2.0 },
+            expectFill: true, expectEvents: 6,
+            expectCentre: Point(x: 1.0, y: 1.0 / (3.0).squareRoot()))
+
+        // 2. unit square, four leaves of length 1/2 on a common node.
+        //    Expect the preliminary-base molecule: 4 diagonals + 4 hinges to the midpoints.
+        let sq = [Point(x: 0, y: 0), Point(x: 1, y: 0), Point(x: 1, y: 1), Point(x: 0, y: 1)]
+        run("square molecule (star4)", sq,
+            requiredMatrix(4) { i, j in ((i - j) % 4 == 0) ? 0 : (abs(i - j) == 2 ? (2.0).squareRoot() : 1.0) },
+            expectFill: true, expectEvents: 8, expectCentre: Point(x: 0.5, y: 0.5))
+
+        // 3. scalene triangle: still one event, still the rabbit ear.
+        let sc = [Point(x: 0, y: 0), Point(x: 3, y: 0), Point(x: 0.7, y: 2.2)]
+        run("rabbit ear (scalene triangle)", sc,
+            requiredMatrix(3) { i, j in len(sub(sc[i], sc[j])) },
+            expectFill: true, expectEvents: 6, expectCentre: nil)
+
+        // 4. a quadrilateral spanning a river: A,B on P (1,1), C,D on Q (1,2), P-Q = 1.
+        //    It satisfies the path condition, but its reduction needs a gusset, so the
+        //    molecule must be REFUSED rather than filled with something unverifiable.
+        let th = 75.0 * Double.pi / 180
+        let qa = Point(x: 0, y: 0)
+        let qb = Point(x: 2, y: 0)
+        let qc = Point(x: 2 + 3 * cos(th), y: 3 * sin(th))
+        let lc = len(qc)
+        let xx = (16 - 9 + lc * lc) / (2 * lc)
+        let hh = (max(0.0, 16 - xx * xx)).squareRoot()
+        let uc = mul(qc, 1 / lc)
+        let qd = add(mul(uc, xx), mul(Point(x: -uc.y, y: uc.x), hh))
+        let river = [[0.0, 2.0, 3.0, 4.0],
+                     [2.0, 0.0, 3.0, 4.0],
+                     [3.0, 3.0, 0.0, 3.0],
+                     [4.0, 4.0, 3.0, 0.0]]
+        run("river quad must be refused", [qa, qb, qc, qd], river,
+            expectFill: false, expectEvents: nil, expectCentre: nil)
+
+        // 5. a quadrilateral with no inscribed circle whose reduction *is* driven by
+        //    contraction alone -- two events, a ridge segment between them.  The old
+        //    inscribed-circle molecule could not express this at all.  The consistent tree
+        //    is read off the polygon's own skeleton: a = t1*c_A and so on.
+        let quad = [Point(x: 0, y: 0), Point(x: 2.2, y: 0),
+                    Point(x: 3.0, y: 2.4), Point(x: 0.4, y: 2.0)]
+        if let (bs1, cs1) = bisectors(quad) {
+            var t1 = Double.infinity
+            var e1 = (0, 0)
+            for i in 0..<4 {
+                let j = (i + 1) % 4
+                let rate = cs1[i] + cs1[j]
+                if rate > 1e-12 {
+                    let t = len(sub(quad[i], quad[j])) / rate
+                    if t < t1 { t1 = t; e1 = (i, j) }
+                }
+            }
+            var leaf = cs1.map { t1 * $0 }
+            var moved: [Point] = []
+            for i in 0..<4 { moved.append(add(quad[i], mul(bs1[i], t1))) }
+            let keep = (0..<4).filter { $0 != e1.1 }
+            let triangle = keep.map { moved[$0] }
+            if let (_, cs2) = bisectors(triangle) {
+                let t2 = len(sub(triangle[0], triangle[1])) / (cs2[0] + cs2[1])
+                let mi = keep.firstIndex(of: e1.0) ?? 0
+                let river2 = t2 * cs2[mi]
+                for k in 0..<4 where k != e1.0 && k != e1.1 { leaf[k] += t2 * cs1[k] }
+                let onP = Set([e1.0, e1.1])
+                let req = requiredMatrix(4) { i, j in
+                    leaf[i] + leaf[j] + (onP.contains(i) == onP.contains(j) ? 0 : river2)
+                }
+                run("non-tangential quad, contraction only", quad, req,
+                    expectFill: true, expectEvents: nil, expectCentre: nil)
+            }
+        }
+
+        return out
+    }
+}

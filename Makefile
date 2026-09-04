@@ -10,6 +10,7 @@ $(BIN): $(wildcard Sources/*.swift)
 # Build, then run the bundled four-flap example, which must produce a verified
 # crease pattern.  Use this to confirm a fresh checkout works.
 check: $(BIN)
+	@./$(BIN) --self-test
 	@rm -rf /tmp/origami-check
 	@./$(BIN) examples/star4/src -o /tmp/origami-check --granularity module --uniform --restarts 40 -q
 	@grep -q "Verified crease pattern emitted" /tmp/origami-check/report.md \

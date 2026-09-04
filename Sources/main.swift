@@ -11,6 +11,24 @@ guard let opts = CLI.parse(CommandLine.arguments) else {
     print(CLI.usage)
     exit(1)
 }
+if opts.selfTest {
+    var failed = 0
+    let d4 = Origami.selfTestDegree4()
+    let d4ok = d4.accepted == d4.expected
+    if !d4ok { failed += 1 }
+    print("\(d4ok ? "ok  " : "FAIL") degree-4 crimp test: \(d4.accepted)/\(d4.expected) assignments accepted (\(d4.detail))")
+    let sq = Origami.squareMoleculeValidAssignments()
+    let sqok = !sq.isEmpty
+    if !sqok { failed += 1 }
+    print("\(sqok ? "ok  " : "FAIL") square molecule: \(sq.count) flat-foldable M/V assignments")
+    for t in UM.selfTest() {
+        if !t.ok { failed += 1 }
+        print("\(t.ok ? "ok  " : "FAIL") \(t.name): \(t.detail)")
+    }
+    print(failed == 0 ? "all self-tests passed" : "\(failed) self-test(s) FAILED")
+    exit(failed == 0 ? 0 : 1)
+}
+
 guard let (srcDir, tempClone) = CLI.resolveSource(opts.source) else {
     FileHandle.standardError.write("cannot resolve source: \(opts.source)\n".data(using: .utf8)!)
     exit(1)
@@ -72,21 +90,6 @@ guard let built = TreeBuild.build(mods: mods, options: bo) else {
     exit(1)
 }
 var tree = built.tree
-
-// Optional design decision: give the paper corners flaps of their own, so that no corner
-// region is left with nothing to absorb it.  This changes the tree, and lowers the scale.
-var cornerLeaves: [String] = []
-if opts.cornerFlaps {
-    let shortest = tree.leaves.map { tree.parentEdgeLength($0) }.min() ?? 1.0
-    let L = opts.cornerFlapLength ?? shortest
-    var e = tree.edges
-    for nm in ["corner.SW", "corner.SE", "corner.NE", "corner.NW"] {
-        cornerLeaves.append(nm)
-        e.append(TreeEdge(parent: tree.root, child: nm, length: L,
-                          provenance: "added by --corner-flaps (length \(String(format: "%.4f", L)))"))
-    }
-    tree = OrigamiTree(root: tree.root, edges: e)
-}
 let check = tree.validateIsTree()
 say("- granularity: `\(opts.granularity.rawValue)`, shared-module policy: `\(opts.sharedPolicy.rawValue)`, edge lengths: \(opts.uniform ? "uniform" : "code-size")")
 for n in built.notes { say("- \(n)") }
@@ -122,22 +125,119 @@ guard tree.leaves.count >= 2 else {
 // ============================================================ 3. packing
 say("# 3. packing (Lang's tree theorem)")
 say()
-let leaves = tree.leaves
-var dmat = [[Double]](repeating: [Double](repeating: 0, count: leaves.count), count: leaves.count)
-for i in 0..<leaves.count {
-    for j in 0..<leaves.count where i != j { dmat[i][j] = tree.distance(leaves[i], leaves[j]) }
-}
-var fixedPts: [Int: Point] = [:]
-if opts.cornerFlaps {
-    let corners = [Point(x: 0, y: 0), Point(x: 1, y: 0), Point(x: 1, y: 1), Point(x: 0, y: 1)]
-    for (k, nm) in cornerLeaves.enumerated() {
-        if let i = leaves.firstIndex(of: nm) { fixedPts[i] = corners[k] }
+func distanceMatrix(_ t: OrigamiTree, _ ls: [String]) -> [[Double]] {
+    let mt = TreeMetric(t)
+    var d = [[Double]](repeating: [Double](repeating: 0, count: ls.count), count: ls.count)
+    for i in 0..<ls.count {
+        for j in 0..<ls.count where i != j { d[i][j] = mt.dist(ls[i], ls[j]) }
     }
-    say("- four flaps pinned to the paper corners (`--corner-flaps`)")
+    return d
 }
-let pack = Packing.optimise(dmat: dmat, leafNames: leaves,
+
+var leaves = tree.leaves
+var dmat = distanceMatrix(tree, leaves)
+
+var pack = Packing.optimise(dmat: dmat, leafNames: leaves,
                             restarts: opts.restarts, iters: 900, seed: 0x5EED,
-                            fixed: fixedPts, compactAfter: opts.compact)
+                            fixed: [:], compactAfter: opts.compact,
+                            cornerBias: opts.corners != .none)
+
+// ---------------------------------------------------------------- corners
+//
+// A paper corner that no leaf occupies is a region of paper with no flap to absorb it, and
+// no molecule exists for the face that contains it.  Two ways out, tried in that order:
+//
+//   1. move a leaf onto the corner.  Free if the packing has the slack for it, and it does
+//      not touch the tree, so nothing downstream has to be re-derived.
+//   2. give the corner a flap of its own.  That does change the tree, so the length is
+//      chosen as the largest one that costs no scale whatsoever:
+//
+//        L <= |u_j - c| / m - d_T(root, j)   for every existing leaf j and corner c
+//        L <= 1 / (2m)                       for two adjacent corner flaps
+//
+//      If that maximum is <= 0 the corner cannot be given a flap for free, and we say so
+//      rather than shrinking the base.  (The previous --corner-flaps used the shortest
+//      existing leaf edge, a number with no bearing on feasibility, which made the four
+//      corner-to-corner constraints binding and dragged the scale down for every real flap.)
+var cornerFixed: [Int: Point] = [:]
+if opts.corners == .auto {
+    let snap = Packing.snapCorners(points: pack.points, dmat: dmat, keepFraction: opts.cornerKeep)
+    if snap.fixed.isEmpty {
+        say("- corner snapping: no leaf could be moved onto a paper corner without losing more than \(fmt((1 - opts.cornerKeep) * 100, 1))% of the scale")
+    } else {
+        let names = snap.fixed.keys.sorted().map { "`\(leaves[$0])`" }.joined(separator: ", ")
+        say("- corner snapping: \(names) moved onto paper corners; scale \(fmt(pack.scale, 6)) -> \(fmt(snap.scale, 6))")
+    }
+    cornerFixed = snap.fixed
+    pack = Packing.verify(points: snap.points, dmat: dmat, leafNames: leaves,
+                          restartsUsed: opts.restarts)
+}
+
+var unoccupied: [Point] = []
+if opts.corners != .none {
+    for c in Packing.unitCorners where !pack.points.contains(where: { hypot($0.x - c.x, $0.y - c.y) < 1e-9 }) {
+        unoccupied.append(c)
+    }
+}
+if !unoccupied.isEmpty {
+    let metric0 = TreeMetric(tree)
+    var maxL = Double.infinity
+    // against every existing leaf: |u_j - c| >= m * (L + d_T(root, j))
+    for c in unoccupied {
+        for (j, u) in pack.points.enumerated() {
+            maxL = min(maxL, hypot(u.x - c.x, u.y - c.y) / pack.scale - metric0.dist(tree.root, leaves[j]))
+        }
+    }
+    // against each other: |c - c'| >= m * 2L, which only bites once there are two of them
+    for a in 0..<unoccupied.count {
+        for b in (a + 1)..<unoccupied.count {
+            let d = hypot(unoccupied[a].x - unoccupied[b].x, unoccupied[a].y - unoccupied[b].y)
+            maxL = min(maxL, d / (2 * pack.scale))
+        }
+    }
+    if let cap = opts.cornerFlapLength { maxL = min(maxL, cap) }
+
+    if maxL <= 1e-9 {
+        say("- corner flaps: **not added**. The longest flap that would cost no scale is \(fmt(maxL, 6)) <= 0, so every corner flap here would shrink the base. \(unoccupied.count) corner(s) stay unoccupied.")
+    } else {
+        let cornerName = ["corner.SW", "corner.SE", "corner.NE", "corner.NW"]
+        var placed: [String: Point] = [:]
+        var edges = tree.edges
+        for c in unoccupied {
+            let k = Packing.unitCorners.firstIndex { hypot($0.x - c.x, $0.y - c.y) < 1e-9 } ?? 0
+            let nm = cornerName[k]
+            placed[nm] = c
+            edges.append(TreeEdge(parent: tree.root, child: nm, length: maxL,
+                                  provenance: String(format: "corner flap, longest that costs no scale (%.4f)", maxL)))
+        }
+        tree = OrigamiTree(root: tree.root, edges: edges)
+
+        var byName: [String: Point] = [:]
+        for (i, nm) in leaves.enumerated() { byName[nm] = pack.points[i] }
+        for (nm, c) in placed { byName[nm] = c }
+        let oldFixedNames = Set(cornerFixed.keys.map { leaves[$0] })
+
+        leaves = tree.leaves
+        dmat = distanceMatrix(tree, leaves)
+        var pts: [Point] = []
+        var fixed: [Int: Point] = [:]
+        for (i, nm) in leaves.enumerated() {
+            let q = byName[nm] ?? Point(x: 0.5, y: 0.5)
+            pts.append(q)
+            if placed[nm] != nil || oldFixedNames.contains(nm) { fixed[i] = q }
+        }
+        let grown = Packing.polish(points: pts, dmat: dmat, fixed: fixed)
+        let after = Packing.verify(points: grown, dmat: dmat, leafNames: leaves,
+                                   restartsUsed: opts.restarts)
+        say("- corner flaps: \(placed.count) added at the unoccupied corner(s), each of tree-edge length \(fmt(maxL, 6)) — the longest that costs no scale; m \(fmt(pack.scale, 6)) -> \(fmt(after.scale, 6))")
+        let recheck = tree.validateIsTree()
+        say("- tree check after adding corner flaps: **\(recheck.ok ? "OK" : "FAILED")** — \(recheck.message)")
+        pack = after
+        cornerFixed = fixed
+    }
+}
+
+let metric = TreeMetric(tree)
 let radii = leaves.map { pack.scale * tree.parentEdgeLength($0) }
 
 say("- leaves (flaps): **\(leaves.count)**")
@@ -159,7 +259,8 @@ say()
 // ============================================================ 4. molecules
 say("# 4. molecules and crease pattern")
 say()
-var mol = Molecule.build(points: pack.points, activePairs: pack.activePairs, leafNames: leaves)
+var mol = Molecule.build(points: pack.points, activePairs: pack.activePairs,
+                         leafNames: leaves, tree: tree, metric: metric, scale: pack.scale)
 for n in mol.notes { say("- \(n)") }
 say("- faces of the active-path subdivision: \(mol.faces)")
 say("- faces filled with a molecule: \(mol.filled) / \(mol.faces)  (area coverage \(fmt(mol.coverage * 100, 1))% of the paper)")
@@ -176,8 +277,28 @@ if mol.filled == 0 {
     say("- crease segments after splitting at interior vertices: \(creases.count)")
     say("- interior vertices to verify: \(iv.count)")
 
+    // The per-vertex theorems only say anything about a *complete* decomposition.  With
+    // faces left unfilled, a molecule's hinge foot lands on an axial crease that its
+    // missing neighbour never met, the vertex comes out with odd degree, and Kawasaki
+    // fails for a reason that has nothing to do with the geometry being wrong.  Reporting
+    // that as "Kawasaki VIOLATED" names the wrong culprit, so say what is actually true.
+    let complete = mol.filled == mol.faces
+    let mismatches = Molecule.hingeMismatches(creases)
+    if !mismatches.isEmpty {
+        say("- \(mismatches.count) interior point(s) where a hinge crease meets an axial crease with no partner from the other side" +
+            (complete ? " — neighbouring molecules disagree about where their hinges meet the path they share"
+                      : " — expected, since \(mol.faces - mol.filled) face(s) are unfilled"))
+    }
+
+    var kawasakiOK = false
+    var mvOK = false
+
+    if !complete {
+        say("- **per-vertex conditions not evaluated**: \(mol.filled) of \(mol.faces) faces are filled, so the crease pattern is incomplete. Kawasaki, Maekawa and the crimp test are only meaningful once every face carries a molecule; running them on a partial map would report a violation that is an artefact of the missing faces, not of the geometry.")
+    } else {
+
     // Kawasaki depends only on geometry, so check it before searching for an M/V assignment.
-    var kawasakiOK = true
+    kawasakiOK = true
     var worstAlt = 0.0
     var oddDegree = 0
     for v in iv {
@@ -191,7 +312,6 @@ if mol.filled == 0 {
     }
     say("- **Kawasaki** at every interior vertex: \(kawasakiOK ? "SATISFIED" : "VIOLATED") (worst |alternating sum| = \(fmt(worstAlt, 9)) degrees)")
 
-    var mvOK = false
     if kawasakiOK, let mv = Molecule.assignMV(creases) {
         for i in creases.indices { creases[i].fold = mv[i] }
         var allOK = true
@@ -211,17 +331,19 @@ if mol.filled == 0 {
         say("- **no M/V assignment found** within the search budget; only the crease geometry is emitted")
     }
 
-    let complete = (mol.filled == mol.faces) && kawasakiOK && mvOK
+    }  // end of the complete-decomposition branch
+
+    let verified = complete && kawasakiOK && mvOK
     say()
-    if complete {
+    if verified {
         say("**Verified crease pattern emitted** — every face is filled, and every interior vertex passes Kawasaki, Maekawa and the crimp test.")
         write("crease-pattern.svg", SVG.creasePattern(creases,
               title: "crease pattern — \(leaves.count) flaps, m = \(fmt(pack.scale, 4)) (verified)"))
         say("- `crease-pattern.svg`")
     } else {
         say("**Partial output only.** \(mol.filled) of \(mol.faces) faces are filled" +
-            (kawasakiOK ? "" : ", and Kawasaki is violated somewhere") +
-            (mvOK ? "" : ", and no verified M/V assignment was found") +
+            (!complete ? "" : (kawasakiOK ? "" : ", and Kawasaki is violated somewhere")) +
+            (!complete ? "" : (mvOK ? "" : ", and no verified M/V assignment was found")) +
             ". This is a molecule map, not a foldable crease pattern; it is labelled as such in the file.")
         write("molecules-partial.svg", SVG.creasePattern(creases,
               title: "PARTIAL molecule map — NOT a foldable crease pattern (\(mol.filled)/\(mol.faces) faces filled)"))

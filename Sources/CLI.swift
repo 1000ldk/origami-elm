@@ -15,9 +15,20 @@ struct Options {
     var keepClone = false
     var quiet = false
     var compact = false
-    var cornerFlaps = false
+    var corners: CornerPolicy = .auto
+    var cornerKeep = 0.98
     var cornerFlapLength: Double? = nil
+    var selfTest = false
 }
+
+/// What to do about paper corners that no leaf node occupies.
+///
+///   auto  : steer the packing towards corner-occupying placements, snap a leaf onto every
+///           corner that can take one without losing scale, and spend a flap on whatever is
+///           left -- but only a flap short enough to cost no scale at all.
+///   flaps : skip the snapping and put a flap on all four corners.
+///   none  : leave the corners alone (faces that touch one stay unfilled).
+enum CornerPolicy: String { case auto, flaps, none }
 
 enum CLI {
 
@@ -46,11 +57,20 @@ enum CLI {
       --compact               after maximising the scale, pull slack pairs together to make the
                               packing more rigid (experimental: it does not currently increase
                               the number of binding constraints)
-      --corner-flaps          add four extra flaps pinned to the paper corners, so that no
-                              corner region is left without a flap to absorb it (this is a
-                              design decision: it changes the tree and lowers the scale)
-      --corner-flap-length L  tree-edge length of those flaps (default: the shortest existing
-                              leaf edge)
+      --corners auto|flaps|none
+                              how to deal with paper corners that no leaf occupies
+                              auto  (default): bias the packing towards corner-occupying
+                                    placements, snap leaves onto the corners that can take
+                                    one for free, and add a flap only where that failed
+                              flaps : put a flap on all four corners
+                              none  : leave the corners alone
+      --corner-keep F         a corner snap is kept only if it retains this fraction of the
+                              scale (default 0.98)
+      --corner-flap-length L  upper bound on the tree-edge length of a corner flap.  The
+                              length actually used is the largest one that costs no scale at
+                              all, capped by this
+      --corner-flaps          alias for --corners flaps
+      --self-test             run the geometry self-tests and exit (no source needed)
       --keep-clone            do not delete a repository cloned into a temp directory
       -h, --help              this text
     """
@@ -73,8 +93,11 @@ enum CLI {
             case "--restarts": o.restarts = Int(next() ?? "") ?? o.restarts
             case "--paper": o.paperMM = Double(next() ?? "") ?? o.paperMM
             case "--compact": o.compact = true
-            case "--corner-flaps": o.cornerFlaps = true
-            case "--corner-flap-length": o.cornerFlapLength = Double(next() ?? ""); o.cornerFlaps = true
+            case "--corners": o.corners = CornerPolicy(rawValue: next() ?? "") ?? .auto
+            case "--corner-keep": o.cornerKeep = Double(next() ?? "") ?? o.cornerKeep
+            case "--corner-flaps": o.corners = .flaps
+            case "--corner-flap-length": o.cornerFlapLength = Double(next() ?? "")
+            case "--self-test": o.selfTest = true
             case "--keep-clone": o.keepClone = true
             case "-q", "--quiet": o.quiet = true
             default:
