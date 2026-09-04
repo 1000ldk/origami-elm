@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="740.00000" height="774.00000" viewBox="0 0 740.00000 774.00000">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<text x="60.00000" y="28" font-family="sans-serif" font-size="16" fill="#111">packing (NOT a crease pattern) — full tree, LOC-weighted edge lengths, m=0.0681</text>
+<rect x="60.00000" y="94.00000" width="620.00000" height="620.00000" fill="none" stroke="#111" stroke-width="2"/>
+<line x1="120.83112" y1="94.16137" x2="315.07477" y2="134.80141" stroke="#c00" stroke-width="1.4" stroke-dasharray="5 4"/>
+<line x1="315.07477" y1="134.80141" x2="603.54435" y2="94.00000" stroke="#c00" stroke-width="1.4" stroke-dasharray="5 4"/>
+<line x1="60.00000" y1="714.00000" x2="679.99997" y2="655.07610" stroke="#c00" stroke-width="1.4" stroke-dasharray="5 4"/>
+<line x1="603.54435" y1="94.00000" x2="680.00000" y2="416.51445" stroke="#c00" stroke-width="1.4" stroke-dasharray="5 4"/>
+<line x1="679.99997" y1="655.07610" x2="680.00000" y2="416.51445" stroke="#c00" stroke-width="1.4" stroke-dasharray="5 4"/>
+<circle cx="120.83112" cy="94.16137" r="99.22476" fill="#2b6cb0" fill-opacity="0.10" stroke="#2b6cb0" stroke-width="1.2"/>
+<circle cx="120.83112" cy="94.16137" r="3.2" fill="#2b6cb0"/>
+<text x="127.83112" y="87.16137" font-family="sans-serif" font-size="12" fill="#123">AboutLinks</text>
+<circle cx="315.07477" cy="134.80141" r="99.22476" fill="#2b6cb0" fill-opacity="0.10" stroke="#2b6cb0" stroke-width="1.2"/>
+<circle cx="315.07477" cy="134.80141" r="3.2" fill="#2b6cb0"/>
+<text x="322.07477" y="127.80141" font-family="sans-serif" font-size="12" fill="#123">AboutProfile</text>
+<circle cx="60.00000" cy="714.00000" r="84.44660" fill="#2b6cb0" fill-opacity="0.10" stroke="#2b6cb0" stroke-width="1.2"/>
+<circle cx="60.00000" cy="714.00000" r="3.2" fill="#2b6cb0"/>
+<text x="67.00000" y="707.00000" font-family="sans-serif" font-size="12" fill="#123">Chrome</text>
+<circle cx="603.54435" cy="94.00000" r="149.89272" fill="#2b6cb0" fill-opacity="0.10" stroke="#2b6cb0" stroke-width="1.2"/>
+<circle cx="603.54435" cy="94.00000" r="3.2" fill="#2b6cb0"/>
+<text x="610.54435" y="87.00000" font-family="sans-serif" font-size="12" fill="#123">HomeList</text>
+<circle cx="485.56018" cy="390.00093" r="21.11165" fill="#2b6cb0" fill-opacity="0.10" stroke="#2b6cb0" stroke-width="1.2"/>
+<circle cx="485.56018" cy="390.00093" r="3.2" fill="#2b6cb0"/>
+<text x="492.56018" y="383.00093" font-family="sans-serif" font-size="12" fill="#123">NotFound</text>
+<circle cx="679.99997" cy="655.07610" r="99.22476" fill="#2b6cb0" fill-opacity="0.10" stroke="#2b6cb0" stroke-width="1.2"/>
+<circle cx="679.99997" cy="655.07610" r="3.2" fill="#2b6cb0"/>
+<text x="686.99997" y="648.07610" font-family="sans-serif" font-size="12" fill="#123">PostBody</text>
+<circle cx="680.00000" cy="416.51445" r="139.33689" fill="#2b6cb0" fill-opacity="0.10" stroke="#2b6cb0" stroke-width="1.2"/>
+<circle cx="680.00000" cy="416.51445" r="3.2" fill="#2b6cb0"/>
+<text x="687.00000" y="409.51445" font-family="sans-serif" font-size="12" fill="#123">PostTitle</text>
+</svg>
