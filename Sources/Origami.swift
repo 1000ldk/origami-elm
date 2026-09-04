@@ -40,6 +40,10 @@ enum Origami {
         var a = sectors
         var f = mv
         guard a.count == f.count, a.count >= 2 else { return false }
+        // An odd-degree interior vertex can never be flat-folded (Maekawa needs |M-V| = 2 with
+        // M + V odd, which is impossible), and the crimp reduction is only defined for even
+        // degree, so reject it here rather than reducing into an inconsistent state.
+        guard a.count % 2 == 0 else { return false }
 
         while a.count > 2 {
             let n = a.count

@@ -51,7 +51,7 @@ enum Packing {
     /// satisfies || u_i - u_j || >= m * d_ij, then every point is clamped back into the
     /// square.  Returns the largest remaining violation.
     static func project(_ p: inout [Point], _ dmat: [[Double]], _ m: Double,
-                        iters: Int, rng: inout Xorshift) -> Double {
+                        iters: Int, rng: inout Xorshift, fixed: [Int: Point] = [:]) -> Double {
         let n = p.count
         var worst = Double.infinity
         for _ in 0..<iters {
@@ -79,6 +79,7 @@ enum Packing {
                 p[i].x = min(1.0, max(0.0, p[i].x))
                 p[i].y = min(1.0, max(0.0, p[i].y))
             }
+            for (i, pt) in fixed { p[i] = pt }
             if worst < 1e-12 { break }
         }
         return worst
@@ -86,7 +87,7 @@ enum Packing {
 
     /// Grow the scale as far as projection can still reach a feasible configuration.
     static func inflate(_ p: inout [Point], _ dmat: [[Double]],
-                        steps: Int, rng: inout Xorshift) -> Double {
+                        steps: Int, rng: inout Xorshift, fixed: [Int: Point] = [:]) -> Double {
         var best = exactScale(p, dmat)
         var bestP = p
         var step = 0.03
@@ -99,12 +100,12 @@ enum Packing {
                 var trial = bestP
                 if attempt > 0 {
                     let mag = 0.015 * Double(attempt)
-                    for i in 0..<trial.count {
+                    for i in 0..<trial.count where fixed[i] == nil {
                         trial[i].x = min(1, max(0, trial[i].x + (rng.unit() - 0.5) * mag))
                         trial[i].y = min(1, max(0, trial[i].y + (rng.unit() - 0.5) * mag))
                     }
                 }
-                let w = project(&trial, dmat, target, iters: 300, rng: &rng)
+                let w = project(&trial, dmat, target, iters: 300, rng: &rng, fixed: fixed)
                 if w < 1e-10 {
                     let s = exactScale(trial, dmat)
                     if s > best { best = s; bestP = trial; success = true; break }
@@ -117,10 +118,49 @@ enum Packing {
         return best
     }
 
+    /// Maximising the scale leaves the configuration under-constrained: only a handful of
+    /// constraints end up tight, so the active-path graph is too sparse to cut the paper into
+    /// polygons.  This pulls every slack pair together, re-projecting to keep feasibility, until
+    /// the packing is as rigid as it can be at the same scale.  The scale never decreases.
+    static func compact(_ p: inout [Point], _ dmat: [[Double]], _ m: Double,
+                        fixed: [Int: Point], iters: Int, rng: inout Xorshift) {
+        let n = p.count
+        var best = p
+        for _ in 0..<iters {
+            var q = best
+            // attraction proportional to slack
+            var fx = [Double](repeating: 0, count: n)
+            var fy = [Double](repeating: 0, count: n)
+            for i in 0..<n {
+                for j in (i + 1)..<n {
+                    let dx = q[i].x - q[j].x, dy = q[i].y - q[j].y
+                    let d = max(hypot(dx, dy), 1e-12)
+                    let slack = d - m * dmat[i][j]
+                    if slack > 0 {
+                        let c = 0.05 * slack / d
+                        fx[i] -= c * dx; fy[i] -= c * dy
+                        fx[j] += c * dx; fy[j] += c * dy
+                    }
+                }
+            }
+            for i in 0..<n where fixed[i] == nil {
+                q[i].x = min(1, max(0, q[i].x + fx[i]))
+                q[i].y = min(1, max(0, q[i].y + fy[i]))
+            }
+            for (i, pt) in fixed { q[i] = pt }
+            let w = project(&q, dmat, m, iters: 400, rng: &rng, fixed: fixed)
+            if w < 1e-10 && exactScale(q, dmat) >= m - 1e-12 { best = q }
+        }
+        p = best
+    }
+
     /// dmat[i][j] = required tree distance between leaves i and j (unscaled).
+    /// `fixed` pins chosen leaves to given points (used to place flaps at the paper corners).
     static func optimise(dmat: [[Double]], leafNames: [String],
                          restarts: Int = 240, iters: Int = 6000,
-                         seed: UInt64 = 0xC0FFEE) -> PackingResult {
+                         seed: UInt64 = 0xC0FFEE,
+                         fixed: [Int: Point] = [:],
+                         compactAfter: Bool = true) -> PackingResult {
         let n = dmat.count
         precondition(n >= 2)
         var rng = Xorshift(seed: seed)
@@ -130,6 +170,7 @@ enum Packing {
 
         for _ in 0..<restarts {
             var p = (0..<n).map { _ in Point(x: rng.unit(), y: rng.unit()) }
+            for (i, pt) in fixed { p[i] = pt }
 
             for it in 0..<iters {
                 let t = Double(it) / Double(iters - 1)
@@ -173,7 +214,7 @@ enum Packing {
                         gx[j] -= c * dx; gy[j] -= c * dy
                     }
                 }
-                for i in 0..<n {
+                for i in 0..<n where fixed[i] == nil {
                     p[i].x = min(1.0, max(0.0, p[i].x + eta * gx[i]))
                     p[i].y = min(1.0, max(0.0, p[i].y + eta * gy[i]))
                 }
@@ -182,16 +223,21 @@ enum Packing {
             // polish: projection + inflation, which is far better than gradient ascent at
             // pushing points onto the boundary and into corners
             var q = p
-            let s = inflate(&q, dmat, steps: 400, rng: &rng)
+            let s = inflate(&q, dmat, steps: 400, rng: &rng, fixed: fixed)
             if s > bestScale { bestScale = s; bestPts = q }
 
             // also try a corner-seeded start, which is where good packings usually live
             var c = (0..<n).map { _ in Point(x: rng.unit(), y: rng.unit()) }
             let corners = [Point(x: 0, y: 0), Point(x: 1, y: 0), Point(x: 1, y: 1), Point(x: 0, y: 1)]
-            for k in 0..<min(4, n) { c[k] = corners[k] }
-            _ = project(&c, dmat, exactScale(c, dmat), iters: 100, rng: &rng)
-            let s2 = inflate(&c, dmat, steps: 400, rng: &rng)
+            for k in 0..<min(4, n) where fixed[k] == nil { c[k] = corners[k] }
+            for (i, pt) in fixed { c[i] = pt }
+            _ = project(&c, dmat, exactScale(c, dmat), iters: 100, rng: &rng, fixed: fixed)
+            let s2 = inflate(&c, dmat, steps: 400, rng: &rng, fixed: fixed)
             if s2 > bestScale { bestScale = s2; bestPts = c }
+        }
+
+        if compactAfter && bestScale > 0 {
+            compact(&bestPts, dmat, bestScale, fixed: fixed, iters: 60, rng: &rng)
         }
 
         // --- verification pass: recompute every constraint from scratch ---
