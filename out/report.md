@@ -1,186 +1,103 @@
-# STEP 1 — Elm source extraction
+# 1. source
 
-| module | file | total | code | comment | blank | string-literal |
-|---|---|---:|---:|---:|---:|---:|
-| `Api.Endpoint` | `Api/Endpoint.elm` | 11 | 8 | 0 | 3 | 0 |
-| `Article.Articles.R8.ElmBlog` | `Article/Articles/R8/ElmBlog.elm` | 29 | 15 | 0 | 7 | 7 |
-| `Article.Slug` | `Article/Slug.elm` | 35 | 14 | 3 | 18 | 0 |
-| `Data.Articles` | `Data/Articles.elm` | 25 | 19 | 2 | 4 | 0 |
-| `Layout` | `Layout.elm` | 57 | 20 | 0 | 7 | 30 |
-| `Main` | `main.elm` | 117 | 99 | 0 | 18 | 0 |
-| `Page.About` | `Page/About.elm` | 57 | 47 | 0 | 10 | 0 |
-| `Page.Home` | `Page/Home.elm` | 37 | 26 | 0 | 11 | 0 |
-| `Page.Post` | `Page/Post.elm` | 65 | 47 | 0 | 18 | 0 |
-| `Route` | `Route.elm` | 23 | 18 | 0 | 5 | 0 |
+- source: `/home/user/1000ldk/elm-web/elm-web/src`
+- 10 Elm modules
 
-### module-name / filename consistency
-- MISMATCH: module `Main` is in `main.elm` (Elm expects `Main.elm`)
+| module | file | code | rendering decls |
+|---|---|---:|---|
+| `Api.Endpoint` | `Api/Endpoint.elm` | 8 | — |
+| `Article.Articles.R8.ElmBlog` | `Article/Articles/R8/ElmBlog.elm` | 15 | `view`(4) |
+| `Article.Slug` | `Article/Slug.elm` | 14 | — |
+| `Data.Articles` | `Data/Articles.elm` | 19 | — |
+| `Layout` | `Layout.elm` | 20 | `view`(11) `styles`(3) |
+| `Main` | `main.elm` | 99 | `view`(13) |
+| `Page.About` | `Page/About.elm` | 47 | `me`(19) `viewLink`(3) |
+| `Page.Home` | `Page/Home.elm` | 26 | `home`(7) `postItem`(8) |
+| `Page.Post` | `Page/Post.elm` | 47 | `view`(13) |
+| `Route` | `Route.elm` | 18 | — |
 
-### internal import graph
-- `Api.Endpoint` -> (no internal imports)
-- `Article.Articles.R8.ElmBlog` -> (no internal imports)
-- `Article.Slug` -> (no internal imports)
-- `Data.Articles` -> (no internal imports)
-- `Layout` -> (no internal imports)
-- `Main` -> `Layout`, `Page.About`, `Page.Home`, `Page.Post`, `Route`
-- `Page.About` -> `Route`
-- `Page.Home` -> `Data.Articles`
-- `Page.Post` -> `Data.Articles`
-- `Route` -> (no internal imports)
+# 2. tree
 
-### imports that do not resolve to any module in this project
-- `Api.Endpoint` imports `Article.slug` — no such module (case-differing candidate: `Article.Slug`). This file cannot compile.
+- granularity: `view`, shared-module policy: `duplicate`, edge lengths: code-size
+- root module: `Main` (auto)
+- shared module `Route` (imported by 2 modules) was duplicated into 2 tree nodes
+- shared module `Data.Articles` (imported by 2 modules) was duplicated into 2 tree nodes
+- imports with no reference found in the body: `Page.About` -> `Route` (kept; pass --drop-unused-imports to drop)
+- tree check: **OK** — single-rooted tree: 17 nodes, 16 edges, 12 leaves
+- depth: 2
 
-### reachability from `Main`
-- reachable: `Data.Articles`, `Layout`, `Main`, `Page.About`, `Page.Home`, `Page.Post`, `Route`
-- NOT reachable (dead for the running app): `Api.Endpoint`, `Article.Articles.R8.ElmBlog`, `Article.Slug`
+```
+Main
+├─ Layout  (0.6000)
+│  ├─ Layout.styles  (0.5000)  [leaf: view decl]
+│  └─ Layout.view  (1.1000)  [leaf: view decl]
+├─ Main.view  (1.3000)  [leaf: view decl]
+├─ Page.About  (2.5000)
+│  ├─ Page.About.me  (1.9000)  [leaf: view decl]
+│  ├─ Page.About.viewLink  (0.5000)  [leaf: view decl]
+│  └─ Route  (0.9000)  [leaf: module]
+├─ Page.Home  (1.1000)
+│  ├─ Data.Articles  (0.9500)  [leaf: module]
+│  ├─ Page.Home.home  (0.7000)  [leaf: view decl]
+│  └─ Page.Home.postItem  (0.8000)  [leaf: view decl]
+├─ Page.Post  (3.4000)
+│  ├─ Data.Articles~2  (0.9500)  [leaf: module]
+│  └─ Page.Post.view  (1.3000)  [leaf: view decl]
+└─ Route~2  (0.9000)  [leaf: module]
+```
 
-### shared modules (in-degree >= 2 over internal imports)
-- `Data.Articles` imported by `Page.Home`, `Page.Post`
-- `Route` imported by `Main`, `Page.About`
+| leaf | kind | edge length | derivation |
+|---|---|---:|---|
+| `Data.Articles` | module | 0.9500 | 19 non-rendering code lines of `Data.Articles` / 2 copies / 10 |
+| `Data.Articles~2` | module | 0.9500 | 19 non-rendering code lines of `Data.Articles` / 2 copies / 10 |
+| `Layout.styles` | view decl | 0.5000 | 3 code lines of `Layout.styles` / 10 |
+| `Layout.view` | view decl | 1.1000 | 11 code lines of `Layout.view` / 10 |
+| `Main.view` | view decl | 1.3000 | 13 code lines of `Main.view` / 10 |
+| `Page.About.me` | view decl | 1.9000 | 19 code lines of `Page.About.me` / 10 |
+| `Page.About.viewLink` | view decl | 0.5000 | 3 code lines of `Page.About.viewLink` / 10 |
+| `Page.Home.home` | view decl | 0.7000 | 7 code lines of `Page.Home.home` / 10 |
+| `Page.Home.postItem` | view decl | 0.8000 | 8 code lines of `Page.Home.postItem` / 10 |
+| `Page.Post.view` | view decl | 1.3000 | 13 code lines of `Page.Post.view` / 10 |
+| `Route` | module | 0.9000 | 18 non-rendering code lines of `Route` / 2 copies / 10 |
+| `Route~2` | module | 0.9000 | 18 non-rendering code lines of `Route` / 2 copies / 10 |
 
-### import-usage heuristic (token scan; `exposing (..)` is undecidable and reported as such)
-- `Page.About` line 8: `import Route` — no reference found in the body (likely dead import)
+# 3. packing (Lang's tree theorem)
 
-# STEP 2 — tree (stick figure) construction
+- leaves (flaps): **12**
+- certified scale m = **0.102140**
+- verification: every one of the 66 pairwise constraints re-evaluated; min slack = -0.000000000; all points inside the square: yes
+- binding (active) constraints: 11
 
-- tree check: OK — single-rooted tree: 12 nodes, 11 edges, 7 leaves
-- depth (root -> deepest leaf, in edges): 3
+| flap | edge length | flap length (unit square) | on 150mm paper | x | y |
+|---|---:|---:|---:|---:|---:|
+| `Data.Articles` | 0.9500 | 0.0970 | 14.6 mm | 0.00093 | 0.34218 |
+| `Data.Articles~2` | 0.9500 | 0.0970 | 14.6 mm | 0.79233 | 0.10220 |
+| `Layout.styles` | 0.5000 | 0.0511 | 7.7 mm | 0.24514 | 0.00000 |
+| `Layout.view` | 1.1000 | 0.1124 | 16.9 mm | 1.00000 | 0.68421 |
+| `Main.view` | 1.3000 | 0.1328 | 19.9 mm | 0.00000 | 0.00001 |
+| `Page.About.me` | 1.9000 | 0.1941 | 29.1 mm | 0.03686 | 1.00000 |
+| `Page.About.viewLink` | 0.5000 | 0.0511 | 7.7 mm | 0.35264 | 0.73371 |
+| `Page.Home.home` | 0.7000 | 0.0715 | 10.7 mm | 0.15887 | 0.28336 |
+| `Page.Home.postItem` | 0.8000 | 0.0817 | 12.3 mm | 0.81039 | 0.99925 |
+| `Page.Post.view` | 1.3000 | 0.1328 | 19.9 mm | 0.99905 | 0.00179 |
+| `Route` | 0.9000 | 0.0919 | 13.8 mm | 0.28659 | 0.86064 |
+| `Route~2` | 0.9000 | 0.0919 | 13.8 mm | 0.73887 | 0.63580 |
 
-| edge | length (uniform) | length (LOC) | how the LOC length was derived |
-|---|---:|---:|---|
-| `Root` -> `Chrome` | 1.0000 | 2.0000 | Layout.elm code lines / 10 |
-| `Root` -> `Router` | 1.0000 | 9.9000 | Main.elm code lines / 10 |
-| `Router` -> `HomeHub` | 1.0000 | 0.5000 | Route.elm / 4 route constructors / 10 |
-| `Router` -> `PostHub` | 1.0000 | 0.5000 | Route.elm / 4 route constructors / 10 |
-| `Router` -> `AboutHub` | 1.0000 | 0.5000 | Route.elm / 4 route constructors / 10 |
-| `Router` -> `NotFound` | 1.0000 | 0.5000 | Route.elm / 4 route constructors / 10 |
-| `HomeHub` -> `HomeList` | 1.0000 | 3.5500 | Page.Home + half of Data.Articles / 10 |
-| `PostHub` -> `PostTitle` | 1.0000 | 3.3000 | half Page.Post + half Data.Articles / 10 |
-| `PostHub` -> `PostBody` | 1.0000 | 2.3500 | half Page.Post / 10 |
-| `AboutHub` -> `AboutProfile` | 1.0000 | 2.3500 | half Page.About / 10 |
-| `AboutHub` -> `AboutLinks` | 1.0000 | 2.3500 | half Page.About / 10 |
+- circle packing diagram: `packing.svg`
 
-- leaves (7): `AboutLinks`, `AboutProfile`, `Chrome`, `HomeList`, `NotFound`, `PostBody`, `PostTitle`
+# 4. molecules and crease pattern
 
-# STEP 3 — Lang tree-theorem feasibility
+- paper corner (0, 0) is not occupied by a leaf node
+- paper corner (1, 0) is not occupied by a leaf node
+- paper corner (1, 1) is not occupied by a leaf node
+- paper corner (0, 1) is not occupied by a leaf node
+- faces of the active-path subdivision: 5
+- faces filled with a molecule: 0 / 5  (area coverage 0.0% of the paper)
+  - unfilled face ["Data.Articles", "Main.view", "Layout.styles", "Page.Home.home"]: not a tangential polygon (residual 2.97e-02): needs a gusset molecule
+  - unfilled face ["Main.view", "Data.Articles", "Page.About.me", "corner15"]: face has a paper corner that is not a leaf node; there is no flap to absorb it
+  - unfilled face ["Page.About.me", "Data.Articles", "Page.Home.home", "Page.About.viewLink", "Page.Home.home", "Layout.styles", "Data.Articles~2", "Layout.view", "Page.Home.postItem", "Layout.view", "corner14", "Page.About.me", "Route"]: face has a paper corner that is not a leaf node; there is no flap to absorb it
+  - unfilled face ["Data.Articles~2", "Layout.styles", "corner13", "Layout.view", "Data.Articles~2", "Page.Post.view"]: face has a paper corner that is not a leaf node; there is no flap to absorb it
+  - unfilled face ["Layout.styles", "Main.view", "corner12"]: face has a paper corner that is not a leaf node; there is no flap to absorb it
 
-### solver validation (n-leaf star, all edges 1 -> required pairwise distance 2m)
-Known optimal minimum pairwise distance D(n) for n points in a unit square;
-for this tree the optimum is m = D(n)/2, so the solver must reproduce D(n).
-
-| n | D(n) known | D(n) found = 2m | abs error |
-|---:|---:|---:|---:|
-| 2 | 1.414214 (sqrt(2)) | 1.414214 | 0.000000 |
-| 3 | 1.035276 (sqrt(6)-sqrt(2)) | 1.035276 | 0.000000 |
-| 4 | 1.000000 (1) | 1.000000 | 0.000000 |
-| 5 | 0.707107 (sqrt(2)/2) | 0.707107 | 0.000000 |
-| 6 | 0.600925 (sqrt(13)/6) | 0.600925 | 0.000000 |
-| 7 | 0.535898 (4-2*sqrt(3)) | 0.535898 | 0.000000 |
-| 8 | 0.517638 ((sqrt(6)-sqrt(2))/2) | 0.517638 | 0.000000 |
-| 9 | 0.500000 (1/2) | 0.500000 | 0.000000 |
-
-- worst absolute error over the validation set: 0.000000
-
-### full tree, uniform edge lengths
-- leaves: 7
-- best certified scale m = 0.184699
-- verification: all pairwise constraints re-evaluated; min slack = 0.000000000, all points inside the square: yes
-- binding (active) constraints: 10 of 21
-
-| leaf | tree edge length | flap length (unit square) | flap length on 15cm | on 24cm |
-|---|---:|---:|---:|---:|
-| `AboutLinks` | 1.0000 | 0.1847 | 2.77 cm | 4.43 cm |
-| `AboutProfile` | 1.0000 | 0.1847 | 2.77 cm | 4.43 cm |
-| `Chrome` | 1.0000 | 0.1847 | 2.77 cm | 4.43 cm |
-| `HomeList` | 1.0000 | 0.1847 | 2.77 cm | 4.43 cm |
-| `NotFound` | 1.0000 | 0.1847 | 2.77 cm | 4.43 cm |
-| `PostBody` | 1.0000 | 0.1847 | 2.77 cm | 4.43 cm |
-| `PostTitle` | 1.0000 | 0.1847 | 2.77 cm | 4.43 cm |
-
-| leaf | x | y | (unit square coordinates) |
-|---|---:|---:|---|
-| `AboutLinks` | 1.00000 | 0.73880 | |
-| `AboutProfile` | 0.73880 | 1.00000 | |
-| `Chrome` | 1.00000 | 0.00000 | |
-| `HomeList` | 0.00000 | 1.00000 | |
-| `NotFound` | 0.50000 | 0.50000 | |
-| `PostBody` | 0.00000 | 0.26120 | |
-| `PostTitle` | 0.26120 | 0.00000 | |
-
-- packing diagram written to `packing-uniform.svg`
-
-### full tree, LOC-weighted edge lengths
-- leaves: 7
-- best certified scale m = 0.068102
-- verification: all pairwise constraints re-evaluated; min slack = 0.000000000, all points inside the square: yes
-- binding (active) constraints: 5 of 21
-
-| leaf | tree edge length | flap length (unit square) | flap length on 15cm | on 24cm |
-|---|---:|---:|---:|---:|
-| `AboutLinks` | 2.3500 | 0.1600 | 2.40 cm | 3.84 cm |
-| `AboutProfile` | 2.3500 | 0.1600 | 2.40 cm | 3.84 cm |
-| `Chrome` | 2.0000 | 0.1362 | 2.04 cm | 3.27 cm |
-| `HomeList` | 3.5500 | 0.2418 | 3.63 cm | 5.80 cm |
-| `NotFound` | 0.5000 | 0.0341 | 0.51 cm | 0.82 cm |
-| `PostBody` | 2.3500 | 0.1600 | 2.40 cm | 3.84 cm |
-| `PostTitle` | 3.3000 | 0.2247 | 3.37 cm | 5.39 cm |
-
-| leaf | x | y | (unit square coordinates) |
-|---|---:|---:|---|
-| `AboutLinks` | 0.09811 | 0.99974 | |
-| `AboutProfile` | 0.41141 | 0.93419 | |
-| `Chrome` | 0.00000 | 0.00000 | |
-| `HomeList` | 0.87668 | 1.00000 | |
-| `NotFound` | 0.68639 | 0.52258 | |
-| `PostBody` | 1.00000 | 0.09504 | |
-| `PostTitle` | 1.00000 | 0.47982 | |
-
-- packing diagram written to `packing-loc.svg`
-
-### how many equal flaps a unit square supports (uniform star tree, all edges 1)
-| flaps n | scale m = flap length | on 15cm square |
-|---:|---:|---:|
-| 2 | 0.70711 | 10.61 cm |
-| 3 | 0.51764 | 7.76 cm |
-| 4 | 0.50000 | 7.50 cm |
-| 5 | 0.35355 | 5.30 cm |
-| 6 | 0.30046 | 4.51 cm |
-| 7 | 0.26795 | 4.02 cm |
-| 8 | 0.25882 | 3.88 cm |
-| 9 | 0.25000 | 3.75 cm |
-| 10 | 0.21064 | 3.16 cm |
-| 11 | 0.19910 | 2.99 cm |
-| 12 | 0.19436 | 2.92 cm |
-| 13 | 0.18305 | 2.75 cm |
-| 14 | 0.17446 | 2.62 cm |
-| 15 | 0.17054 | 2.56 cm |
-| 16 | 0.16667 | 2.50 cm |
-
-### routing sub-tree only (Router -> Home / Post / About / NotFound)
-- best certified scale m = 0.500000 (exact optimum is 1/2; four points at the four corners)
-- min slack after verification: 0.000000000
-- active constraints: 4 (the four sides of the square)
-
-# STEP 4 — crease pattern for the routing sub-tree
-
-### self-test of the flat-foldability checker
-- degree-4 vertex, four 90-degree sectors: checker accepts 8 of 16 M/V assignments (textbook answer: 8); breakdown M=1:4, M=3:4
-- checker AGREES with the textbook result
-
-### square molecule (four corner flaps of length 1/2, all four paper edges active)
-- M/V assignments of the 8 creases that pass the crimp test: 112 of 256
-- grouped by mountain count: M=3: 56, M=5: 56
-- a 4-fold symmetric assignment (4 mountains on the diagonals, 4 valleys on the hinges) is NOT valid — Maekawa forbids |M-V| = 0
-
-### verification of the emitted crease pattern
-- interior vertices: 1 (the four hinge endpoints lie on the paper boundary, where neither theorem applies)
-- vertex (0.500, 0.500): degree 8, sectors 45.00/45.00/45.00/45.00/45.00/45.00/45.00/45.00
-  - Kawasaki: alternating sum = 0.000000000 -> SATISFIED
-  - Maekawa: M = 3, V = 5, |M-V| = 2 -> SATISFIED
-  - single-vertex M/V flat-foldability (crimp reduction): FOLDABLE
-- overall: all interior vertices pass all three checks
-
-- assignment used (cyclic from the right-edge hinge): M:hinge -> midpoint of right edge; V:bisector -> corner (1,1); M:hinge -> midpoint of top edge; V:bisector -> corner (0,1); M:hinge -> midpoint of left edge; V:bisector -> corner (0,0); V:hinge -> midpoint of bottom edge; V:bisector -> corner (1,0)
-- crease pattern written to `cp-routing.svg`
+**No crease pattern is emitted.** Nothing verifiable was produced, for the reasons above.
 

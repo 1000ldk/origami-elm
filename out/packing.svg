@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="740.00000" height="774.00000" viewBox="0 0 740.00000 774.00000">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<text x="60.00000" y="28" font-family="sans-serif" font-size="16" fill="#111">circle packing (NOT a crease pattern) — 12 flaps, m = 0.1021</text>
+<rect x="60.00000" y="94.00000" width="620.00000" height="620.00000" fill="none" stroke="#111" stroke-width="2"/>
+<line x1="60.57731" y1="501.84874" x2="60.00000" y2="713.99201" stroke="#c00" stroke-width="1.4" stroke-dasharray="5 4"/>
+<line x1="60.57731" y1="501.84874" x2="82.85034" y2="94.00000" stroke="#c00" stroke-width="1.4" stroke-dasharray="5 4"/>
+<line x1="60.57731" y1="501.84874" x2="158.49648" y2="538.31459" stroke="#c00" stroke-width="1.4" stroke-dasharray="5 4"/>
+<line x1="551.24682" y1="650.63407" x2="211.98380" y2="714.00000" stroke="#c00" stroke-width="1.4" stroke-dasharray="5 4"/>
+<line x1="551.24682" y1="650.63407" x2="680.00000" y2="289.79058" stroke="#c00" stroke-width="1.4" stroke-dasharray="5 4"/>
+<line x1="551.24682" y1="650.63407" x2="679.41037" y2="712.89180" stroke="#c00" stroke-width="1.4" stroke-dasharray="5 4"/>
+<line x1="211.98380" y1="714.00000" x2="60.00000" y2="713.99201" stroke="#c00" stroke-width="1.4" stroke-dasharray="5 4"/>
+<line x1="211.98380" y1="714.00000" x2="158.49648" y2="538.31459" stroke="#c00" stroke-width="1.4" stroke-dasharray="5 4"/>
+<line x1="680.00000" y1="289.79058" x2="562.44267" y2="94.46215" stroke="#c00" stroke-width="1.4" stroke-dasharray="5 4"/>
+<line x1="82.85034" y1="94.00000" x2="237.68819" y2="180.40398" stroke="#c00" stroke-width="1.4" stroke-dasharray="5 4"/>
+<line x1="278.63795" y1="259.09724" x2="158.49648" y2="538.31459" stroke="#c00" stroke-width="1.4" stroke-dasharray="5 4"/>
+<circle cx="60.57731" cy="501.84874" r="60.16025" fill="#2b6cb0" fill-opacity="0.10" stroke="#2b6cb0" stroke-width="1.2"/>
+<circle cx="60.57731" cy="501.84874" r="3.2" fill="#2b6cb0"/>
+<text x="67.57731" y="494.84874" font-family="sans-serif" font-size="12" fill="#123">Data.Articles</text>
+<circle cx="551.24682" cy="650.63407" r="60.16025" fill="#2b6cb0" fill-opacity="0.10" stroke="#2b6cb0" stroke-width="1.2"/>
+<circle cx="551.24682" cy="650.63407" r="3.2" fill="#2b6cb0"/>
+<text x="558.24682" y="643.63407" font-family="sans-serif" font-size="12" fill="#123">Data.Articles~2</text>
+<circle cx="211.98380" cy="714.00000" r="31.66329" fill="#2b6cb0" fill-opacity="0.10" stroke="#2b6cb0" stroke-width="1.2"/>
+<circle cx="211.98380" cy="714.00000" r="3.2" fill="#2b6cb0"/>
+<text x="218.98380" y="707.00000" font-family="sans-serif" font-size="12" fill="#123">Layout.styles</text>
+<circle cx="680.00000" cy="289.79058" r="69.65924" fill="#2b6cb0" fill-opacity="0.10" stroke="#2b6cb0" stroke-width="1.2"/>
+<circle cx="680.00000" cy="289.79058" r="3.2" fill="#2b6cb0"/>
+<text x="687.00000" y="282.79058" font-family="sans-serif" font-size="12" fill="#123">Layout.view</text>
+<circle cx="60.00000" cy="713.99201" r="82.32456" fill="#2b6cb0" fill-opacity="0.10" stroke="#2b6cb0" stroke-width="1.2"/>
+<circle cx="60.00000" cy="713.99201" r="3.2" fill="#2b6cb0"/>
+<text x="67.00000" y="706.99201" font-family="sans-serif" font-size="12" fill="#123">Main.view</text>
+<circle cx="82.85034" cy="94.00000" r="120.32051" fill="#2b6cb0" fill-opacity="0.10" stroke="#2b6cb0" stroke-width="1.2"/>
+<circle cx="82.85034" cy="94.00000" r="3.2" fill="#2b6cb0"/>
+<text x="89.85034" y="87.00000" font-family="sans-serif" font-size="12" fill="#123">Page.About.me</text>
+<circle cx="278.63795" cy="259.09724" r="31.66329" fill="#2b6cb0" fill-opacity="0.10" stroke="#2b6cb0" stroke-width="1.2"/>
+<circle cx="278.63795" cy="259.09724" r="3.2" fill="#2b6cb0"/>
+<text x="285.63795" y="252.09724" font-family="sans-serif" font-size="12" fill="#123">Page.About.viewLink</text>
+<circle cx="158.49648" cy="538.31459" r="44.32861" fill="#2b6cb0" fill-opacity="0.10" stroke="#2b6cb0" stroke-width="1.2"/>
+<circle cx="158.49648" cy="538.31459" r="3.2" fill="#2b6cb0"/>
+<text x="165.49648" y="531.31459" font-family="sans-serif" font-size="12" fill="#123">Page.Home.home</text>
+<circle cx="562.44267" cy="94.46215" r="50.66127" fill="#2b6cb0" fill-opacity="0.10" stroke="#2b6cb0" stroke-width="1.2"/>
+<circle cx="562.44267" cy="94.46215" r="3.2" fill="#2b6cb0"/>
+<text x="569.44267" y="87.46215" font-family="sans-serif" font-size="12" fill="#123">Page.Home.postItem</text>
+<circle cx="679.41037" cy="712.89180" r="82.32456" fill="#2b6cb0" fill-opacity="0.10" stroke="#2b6cb0" stroke-width="1.2"/>
+<circle cx="679.41037" cy="712.89180" r="3.2" fill="#2b6cb0"/>
+<text x="686.41037" y="705.89180" font-family="sans-serif" font-size="12" fill="#123">Page.Post.view</text>
+<circle cx="237.68819" cy="180.40398" r="56.99393" fill="#2b6cb0" fill-opacity="0.10" stroke="#2b6cb0" stroke-width="1.2"/>
+<circle cx="237.68819" cy="180.40398" r="3.2" fill="#2b6cb0"/>
+<text x="244.68819" y="173.40398" font-family="sans-serif" font-size="12" fill="#123">Route</text>
+<circle cx="518.09942" cy="319.80228" r="56.99393" fill="#2b6cb0" fill-opacity="0.10" stroke="#2b6cb0" stroke-width="1.2"/>
+<circle cx="518.09942" cy="319.80228" r="3.2" fill="#2b6cb0"/>
+<text x="525.09942" y="312.80228" font-family="sans-serif" font-size="12" fill="#123">Route~2</text>
+</svg>

@@ -1,338 +1,236 @@
 // main.swift — driver.
-// usage: origami <path-to-elm-src> <output-dir>
+//
+//   origami <source> [options]
+//
+// Elm codebase -> module graph -> stick-figure tree -> Lang tree-theorem packing
+// -> molecule decomposition -> verified crease pattern (or a precise reason why not).
 
 import Foundation
 
-let args = CommandLine.arguments
-let srcRoot = args.count > 1 ? args[1] : "./src"
-let outDir  = args.count > 2 ? args[2] : "./out"
-try? FileManager.default.createDirectory(atPath: outDir, withIntermediateDirectories: true)
+guard let opts = CLI.parse(CommandLine.arguments) else {
+    print(CLI.usage)
+    exit(1)
+}
+guard let (srcDir, tempClone) = CLI.resolveSource(opts.source) else {
+    FileHandle.standardError.write("cannot resolve source: \(opts.source)\n".data(using: .utf8)!)
+    exit(1)
+}
+defer {
+    if let t = tempClone, !opts.keepClone { try? FileManager.default.removeItem(atPath: t) }
+}
+try? FileManager.default.createDirectory(atPath: opts.outDir, withIntermediateDirectories: true)
 
 var report = ""
-func say(_ s: String = "") { print(s); report += s + "\n" }
+func say(_ s: String = "") { if !opts.quiet { print(s) }; report += s + "\n" }
 func fmt(_ v: Double, _ d: Int = 4) -> String { String(format: "%.\(d)f", v) }
-
-// ---------------------------------------------------------------- step 1: parse
-say("# STEP 1 — Elm source extraction")
-say()
-
-var files: [String] = []
-if let en = FileManager.default.enumerator(atPath: srcRoot) {
-    for case let f as String in en where f.hasSuffix(".elm") { files.append(f) }
+func write(_ name: String, _ body: String) {
+    try? body.write(toFile: (opts.outDir as NSString).appendingPathComponent(name),
+                    atomically: true, encoding: .utf8)
 }
-files.sort()
 
+// ============================================================ 1. parse
+say("# 1. source")
+say()
+say("- source: `\(opts.source)`" + (tempClone != nil ? " (cloned)" : ""))
+
+let files = CLI.findElmFiles(srcDir)
 var mods: [String: ElmModule] = [:]
-var order: [String] = []
 for rel in files {
-    let full = (srcRoot as NSString).appendingPathComponent(rel)
+    let full = (srcDir as NSString).appendingPathComponent(rel)
     guard let txt = try? String(contentsOfFile: full, encoding: .utf8) else { continue }
     let m = ElmParse.parse(path: rel, text: txt)
     mods[m.name] = m
-    order.append(m.name)
 }
-order.sort()
-
-say("| module | file | total | code | comment | blank | string-literal |")
-say("|---|---|---:|---:|---:|---:|---:|")
+guard !mods.isEmpty else {
+    FileHandle.standardError.write("no .elm files found under \(srcDir)\n".data(using: .utf8)!)
+    exit(1)
+}
+let order = mods.keys.sorted()
+say("- \(mods.count) Elm modules")
+say()
+say("| module | file | code | rendering decls |")
+say("|---|---|---:|---|")
 for n in order {
     let m = mods[n]!
-    say("| `\(m.name)` | `\(m.path)` | \(m.totalLines) | \(m.codeLines) | \(m.commentLines) | \(m.blankLines) | \(m.literalLines) |")
+    let vs = m.viewDecls.map { "`\($0.name)`(\($0.codeLines))" }.joined(separator: " ")
+    say("| `\(m.name)` | `\(m.path)` | \(m.codeLines) | \(vs.isEmpty ? "—" : vs) |")
 }
 say()
 
-// filename / module-name consistency (Elm requires them to match)
-say("### module-name / filename consistency")
-for n in order {
-    let m = mods[n]!
-    let expected = m.name.replacingOccurrences(of: ".", with: "/") + ".elm"
-    let ok = m.path.hasSuffix(expected)
-    if !ok { say("- MISMATCH: module `\(m.name)` is in `\(m.path)` (Elm expects `\(expected)`)") }
+// ============================================================ 2. tree
+say("# 2. tree")
+say()
+var bo = BuildOptions()
+bo.granularity = opts.granularity
+bo.sharedPolicy = opts.sharedPolicy
+bo.dropUnusedImports = opts.dropUnusedImports
+bo.rootHint = opts.rootHint
+bo.uniformLengths = opts.uniform
+
+guard let built = TreeBuild.build(mods: mods, options: bo) else {
+    FileHandle.standardError.write("could not determine a root module\n".data(using: .utf8)!)
+    exit(1)
+}
+var tree = built.tree
+
+// Optional design decision: give the paper corners flaps of their own, so that no corner
+// region is left with nothing to absorb it.  This changes the tree, and lowers the scale.
+var cornerLeaves: [String] = []
+if opts.cornerFlaps {
+    let shortest = tree.leaves.map { tree.parentEdgeLength($0) }.min() ?? 1.0
+    let L = opts.cornerFlapLength ?? shortest
+    var e = tree.edges
+    for nm in ["corner.SW", "corner.SE", "corner.NE", "corner.NW"] {
+        cornerLeaves.append(nm)
+        e.append(TreeEdge(parent: tree.root, child: nm, length: L,
+                          provenance: "added by --corner-flaps (length \(String(format: "%.4f", L)))"))
+    }
+    tree = OrigamiTree(root: tree.root, edges: e)
+}
+let check = tree.validateIsTree()
+say("- granularity: `\(opts.granularity.rawValue)`, shared-module policy: `\(opts.sharedPolicy.rawValue)`, edge lengths: \(opts.uniform ? "uniform" : "code-size")")
+for n in built.notes { say("- \(n)") }
+if !built.deadImports.isEmpty {
+    say("- imports with no reference found in the body: " +
+        built.deadImports.map { "`\($0.0)` -> `\($0.1)`" }.joined(separator: ", ") +
+        (opts.dropUnusedImports ? " (dropped)" : " (kept; pass --drop-unused-imports to drop)"))
+}
+if !built.backEdges.isEmpty {
+    say("- import cycles broken: " + built.backEdges.map { "`\($0.0)` -> `\($0.1)`" }.joined(separator: ", "))
+}
+say("- tree check: **\(check.ok ? "OK" : "FAILED")** — \(check.message)")
+say("- depth: \(tree.depth)")
+say()
+say("```")
+say(TreeBuild.render(tree, leafKind: built.leafKind).trimmingCharacters(in: .newlines))
+say("```")
+say()
+say("| leaf | kind | edge length | derivation |")
+say("|---|---|---:|---|")
+for l in tree.leaves.sorted() {
+    let e = tree.edges.first { $0.child == l }
+    say("| `\(l)` | \(built.leafKind[l] ?? "?") | \(fmt(tree.parentEdgeLength(l))) | \(e?.provenance ?? "—") |")
 }
 say()
 
-// dependency graph, project-internal edges only
-say("### internal import graph")
-var deps: [String: [String]] = [:]
-var inDegree: [String: Int] = [:]
-var unresolved: [(String, String)] = []
-for n in order {
-    let m = mods[n]!
-    for imp in m.imports {
-        if mods[imp.module] != nil {
-            deps[n, default: []].append(imp.module)
-            inDegree[imp.module, default: 0] += 1
-        } else if imp.module.contains(".") &&
-                  mods.keys.contains(where: { $0.lowercased() == imp.module.lowercased() }) {
-            unresolved.append((n, imp.module))
+guard tree.leaves.count >= 2 else {
+    say("Fewer than two leaves; there is no base to design.")
+    write("report.md", report)
+    exit(0)
+}
+
+// ============================================================ 3. packing
+say("# 3. packing (Lang's tree theorem)")
+say()
+let leaves = tree.leaves
+var dmat = [[Double]](repeating: [Double](repeating: 0, count: leaves.count), count: leaves.count)
+for i in 0..<leaves.count {
+    for j in 0..<leaves.count where i != j { dmat[i][j] = tree.distance(leaves[i], leaves[j]) }
+}
+var fixedPts: [Int: Point] = [:]
+if opts.cornerFlaps {
+    let corners = [Point(x: 0, y: 0), Point(x: 1, y: 0), Point(x: 1, y: 1), Point(x: 0, y: 1)]
+    for (k, nm) in cornerLeaves.enumerated() {
+        if let i = leaves.firstIndex(of: nm) { fixedPts[i] = corners[k] }
+    }
+    say("- four flaps pinned to the paper corners (`--corner-flaps`)")
+}
+let pack = Packing.optimise(dmat: dmat, leafNames: leaves,
+                            restarts: opts.restarts, iters: 900, seed: 0x5EED,
+                            fixed: fixedPts, compactAfter: opts.compact)
+let radii = leaves.map { pack.scale * tree.parentEdgeLength($0) }
+
+say("- leaves (flaps): **\(leaves.count)**")
+say("- certified scale m = **\(fmt(pack.scale, 6))**")
+say("- verification: every one of the \(leaves.count * (leaves.count - 1) / 2) pairwise constraints re-evaluated; min slack = \(fmt(pack.minSlack, 9)); all points inside the square: \(pack.feasible ? "yes" : "**NO**")")
+say("- binding (active) constraints: \(pack.activePairs.count)")
+say()
+say("| flap | edge length | flap length (unit square) | on \(Int(opts.paperMM))mm paper | x | y |")
+say("|---|---:|---:|---:|---:|---:|")
+for (i, nm) in leaves.enumerated() {
+    say("| `\(nm)` | \(fmt(tree.parentEdgeLength(nm))) | \(fmt(radii[i])) | \(fmt(radii[i] * opts.paperMM, 1)) mm | \(fmt(pack.points[i].x, 5)) | \(fmt(pack.points[i].y, 5)) |")
+}
+say()
+write("packing.svg", SVG.packingDiagram(pack, radii: radii,
+      title: "circle packing (NOT a crease pattern) — \(leaves.count) flaps, m = \(fmt(pack.scale, 4))"))
+say("- circle packing diagram: `packing.svg`")
+say()
+
+// ============================================================ 4. molecules
+say("# 4. molecules and crease pattern")
+say()
+var mol = Molecule.build(points: pack.points, activePairs: pack.activePairs, leafNames: leaves)
+for n in mol.notes { say("- \(n)") }
+say("- faces of the active-path subdivision: \(mol.faces)")
+say("- faces filled with a molecule: \(mol.filled) / \(mol.faces)  (area coverage \(fmt(mol.coverage * 100, 1))% of the paper)")
+for u in mol.unfilled {
+    say("  - unfilled face \(u.verts.map { $0 < leaves.count ? leaves[$0] : "corner\($0)" }): \(u.reason)")
+}
+
+if mol.filled == 0 {
+    say()
+    say("**No crease pattern is emitted.** Nothing verifiable was produced, for the reasons above.")
+} else {
+    var creases = Molecule.splitAtPoints(mol.creases)
+    let iv = Molecule.interiorVertices(creases)
+    say("- crease segments after splitting at interior vertices: \(creases.count)")
+    say("- interior vertices to verify: \(iv.count)")
+
+    // Kawasaki depends only on geometry, so check it before searching for an M/V assignment.
+    var kawasakiOK = true
+    var worstAlt = 0.0
+    var oddDegree = 0
+    for v in iv {
+        guard let c = Origami.analyseVertex(at: v, creases: creases) else { continue }
+        worstAlt = max(worstAlt, abs(c.kawasakiAlternatingSum))
+        if c.degree % 2 == 1 { oddDegree += 1 }
+        if !c.kawasakiOK { kawasakiOK = false }
+    }
+    if oddDegree > 0 {
+        say("- \(oddDegree) interior vertex/vertices have ODD degree, which no flat folding admits. This means neighbouring molecules do not agree on where their hinge creases meet the shared axial path — the decomposition is incomplete, not merely unassigned.")
+    }
+    say("- **Kawasaki** at every interior vertex: \(kawasakiOK ? "SATISFIED" : "VIOLATED") (worst |alternating sum| = \(fmt(worstAlt, 9)) degrees)")
+
+    var mvOK = false
+    if kawasakiOK, let mv = Molecule.assignMV(creases) {
+        for i in creases.indices { creases[i].fold = mv[i] }
+        var allOK = true
+        var checks: [VertexCheck] = []
+        for v in iv {
+            guard let c = Origami.analyseVertex(at: v, creases: creases) else { continue }
+            checks.append(c)
+            if !(c.kawasakiOK && c.maekawaOK && c.mvFoldable) { allOK = false }
         }
+        mvOK = allOK
+        mol.interiorVertices = checks
+        say("- **Maekawa** at every interior vertex: \(checks.allSatisfy { $0.maekawaOK } ? "SATISFIED" : "VIOLATED")")
+        say("- **single-vertex flat-foldability** (crimp reduction) at every interior vertex: \(checks.allSatisfy { $0.mvFoldable } ? "FOLDABLE" : "NOT FOLDABLE")")
+        say("- degrees: " + Dictionary(grouping: checks, by: { $0.degree }).keys.sorted()
+            .map { d in "deg \(d): \(checks.filter { $0.degree == d }.count)" }.joined(separator: ", "))
+    } else if kawasakiOK {
+        say("- **no M/V assignment found** within the search budget; only the crease geometry is emitted")
     }
-}
-for n in order {
-    let d = (deps[n] ?? []).sorted()
-    say("- `\(n)` -> \(d.isEmpty ? "(no internal imports)" : d.map { "`\($0)`" }.joined(separator: ", "))")
-}
-say()
-if !unresolved.isEmpty {
-    say("### imports that do not resolve to any module in this project")
-    for (a, b) in unresolved {
-        let near = mods.keys.first { $0.lowercased() == b.lowercased() } ?? "?"
-        say("- `\(a)` imports `\(b)` — no such module (case-differing candidate: `\(near)`). This file cannot compile.")
+
+    let complete = (mol.filled == mol.faces) && kawasakiOK && mvOK
+    say()
+    if complete {
+        say("**Verified crease pattern emitted** — every face is filled, and every interior vertex passes Kawasaki, Maekawa and the crimp test.")
+        write("crease-pattern.svg", SVG.creasePattern(creases,
+              title: "crease pattern — \(leaves.count) flaps, m = \(fmt(pack.scale, 4)) (verified)"))
+        say("- `crease-pattern.svg`")
+    } else {
+        say("**Partial output only.** \(mol.filled) of \(mol.faces) faces are filled" +
+            (kawasakiOK ? "" : ", and Kawasaki is violated somewhere") +
+            (mvOK ? "" : ", and no verified M/V assignment was found") +
+            ". This is a molecule map, not a foldable crease pattern; it is labelled as such in the file.")
+        write("molecules-partial.svg", SVG.creasePattern(creases,
+              title: "PARTIAL molecule map — NOT a foldable crease pattern (\(mol.filled)/\(mol.faces) faces filled)"))
+        say("- `molecules-partial.svg`")
     }
     say()
+    say("Not checked in any case: global layer ordering (deciding flat-foldability of a multi-vertex crease pattern is NP-hard). The guarantee here is Lang's Universal Molecule theorem plus the per-vertex conditions above.")
 }
 
-// reachability from Main
-var reachable = Set<String>()
-if mods["Main"] != nil {
-    var stack = ["Main"]
-    reachable.insert("Main")
-    while let x = stack.popLast() {
-        for d in deps[x] ?? [] where !reachable.contains(d) { reachable.insert(d); stack.append(d) }
-    }
-}
-let dead = order.filter { !reachable.contains($0) }
-say("### reachability from `Main`")
-say("- reachable: \(reachable.sorted().map { "`\($0)`" }.joined(separator: ", "))")
-say("- NOT reachable (dead for the running app): \(dead.isEmpty ? "none" : dead.map { "`\($0)`" }.joined(separator: ", "))")
 say()
-
-// shared modules + unused-import heuristic
-say("### shared modules (in-degree >= 2 over internal imports)")
-var shared: [String] = []
-for n in order where (inDegree[n] ?? 0) >= 2 { shared.append(n) }
-if shared.isEmpty { say("- none") }
-for n in shared {
-    let users = order.filter { (deps[$0] ?? []).contains(n) }
-    say("- `\(n)` imported by \(users.map { "`\($0)`" }.joined(separator: ", "))")
-}
-say()
-say("### import-usage heuristic (token scan; `exposing (..)` is undecidable and reported as such)")
-for n in order {
-    let m = mods[n]!
-    for imp in m.imports where mods[imp.module] != nil {
-        let u = ElmParse.importLooksUsed(imp, in: m, allModules: mods)
-        if u == false {
-            say("- `\(n)` line \(imp.line): `import \(imp.module)` — no reference found in the body (likely dead import)")
-        } else if u == nil {
-            say("- `\(n)` line \(imp.line): `import \(imp.module)` — UNDECIDED by this heuristic")
-        }
-    }
-}
-say()
-
-// ---------------------------------------------------------------- step 2: tree
-say("# STEP 2 — tree (stick figure) construction")
-say()
-
-func loc(_ n: String) -> Double { Double(mods[n]?.codeLines ?? 0) }
-func locNoLit(_ n: String) -> Double { Double(mods[n]?.codeLines ?? 0) }
-
-func edgeLen(_ rawLOC: Double) -> Double { max(0.5, rawLOC / 10.0) }
-
-let routeQuarter = loc("Route") / 4.0
-let artHalf = loc("Data.Articles") / 2.0
-
-func buildTree(uniform: Bool) -> OrigamiTree {
-    func L(_ v: Double, _ why: String) -> (Double, String) { (uniform ? 1.0 : edgeLen(v), uniform ? "uniform 1.0" : why) }
-    var e: [TreeEdge] = []
-    func add(_ p: String, _ c: String, _ v: Double, _ why: String) {
-        let (len, prov) = L(v, why)
-        e.append(TreeEdge(parent: p, child: c, length: len, provenance: prov))
-    }
-    add("Root", "Chrome",       loc("Layout"),                 "Layout.elm code lines / 10")
-    add("Root", "Router",       loc("Main"),                   "Main.elm code lines / 10")
-    add("Router", "HomeHub",    routeQuarter,                  "Route.elm / 4 route constructors / 10")
-    add("Router", "PostHub",    routeQuarter,                  "Route.elm / 4 route constructors / 10")
-    add("Router", "AboutHub",   routeQuarter,                  "Route.elm / 4 route constructors / 10")
-    add("Router", "NotFound",   routeQuarter,                  "Route.elm / 4 route constructors / 10")
-    add("HomeHub", "HomeList",  loc("Page.Home") + artHalf,    "Page.Home + half of Data.Articles / 10")
-    add("PostHub", "PostTitle", loc("Page.Post") / 2 + artHalf, "half Page.Post + half Data.Articles / 10")
-    add("PostHub", "PostBody",  loc("Page.Post") / 2,          "half Page.Post / 10")
-    add("AboutHub", "AboutProfile", loc("Page.About") / 2,     "half Page.About / 10")
-    add("AboutHub", "AboutLinks",   loc("Page.About") / 2,     "half Page.About / 10")
-    return OrigamiTree(root: "Root", edges: e)
-}
-
-let treeUniform = buildTree(uniform: true)
-let treeLOC = buildTree(uniform: false)
-
-let v = treeLOC.validateIsTree()
-say("- tree check: \(v.ok ? "OK" : "FAILED") — \(v.message)")
-say("- depth (root -> deepest leaf, in edges): \(treeLOC.depth)")
-say()
-say("| edge | length (uniform) | length (LOC) | how the LOC length was derived |")
-say("|---|---:|---:|---|")
-for (i, e) in treeLOC.edges.enumerated() {
-    say("| `\(e.parent)` -> `\(e.child)` | 1.0000 | \(fmt(e.length)) | \(e.provenance) |")
-    _ = i
-}
-say()
-say("- leaves (\(treeLOC.leaves.count)): \(treeLOC.leaves.map { "`\($0)`" }.joined(separator: ", "))")
-say()
-
-// ---------------------------------------------------------------- step 3: packing
-say("# STEP 3 — Lang tree-theorem feasibility")
-say()
-
-func dmatrix(_ t: OrigamiTree) -> ([[Double]], [String]) {
-    let ls = t.leaves
-    var d = [[Double]](repeating: [Double](repeating: 0, count: ls.count), count: ls.count)
-    for i in 0..<ls.count {
-        for j in 0..<ls.count where i != j { d[i][j] = t.distance(ls[i], ls[j]) }
-    }
-    return (d, ls)
-}
-
-// --- solver validation against known optimal point-spreads in the unit square ---
-say("### solver validation (n-leaf star, all edges 1 -> required pairwise distance 2m)")
-say("Known optimal minimum pairwise distance D(n) for n points in a unit square;")
-say("for this tree the optimum is m = D(n)/2, so the solver must reproduce D(n).")
-say()
-let knownD: [Int: (Double, String)] = [
-    2: ((2.0 as Double).squareRoot(), "sqrt(2)"),
-    3: ((6.0 as Double).squareRoot() - (2.0 as Double).squareRoot(), "sqrt(6)-sqrt(2)"),
-    4: (1.0, "1"),
-    5: ((2.0 as Double).squareRoot() / 2, "sqrt(2)/2"),
-    6: ((13.0 as Double).squareRoot() / 6, "sqrt(13)/6"),
-    7: (4 - 2 * (3.0 as Double).squareRoot(), "4-2*sqrt(3)"),
-    8: (((6.0 as Double).squareRoot() - (2.0 as Double).squareRoot()) / 2, "(sqrt(6)-sqrt(2))/2"),
-    9: (0.5, "1/2")
-]
-say("| n | D(n) known | D(n) found = 2m | abs error |")
-say("|---:|---:|---:|---:|")
-var worstErr = 0.0
-for n in 2...9 {
-    var d = [[Double]](repeating: [Double](repeating: 0, count: n), count: n)
-    for i in 0..<n { for j in 0..<n where i != j { d[i][j] = 2.0 } }
-    let r = Packing.optimise(dmat: d, leafNames: (0..<n).map { "p\($0)" },
-                             restarts: 120, iters: 900, seed: UInt64(1234 + n))
-    let found = 2 * r.scale
-    let err = abs(found - knownD[n]!.0)
-    worstErr = max(worstErr, err)
-    say("| \(n) | \(fmt(knownD[n]!.0, 6)) (\(knownD[n]!.1)) | \(fmt(found, 6)) | \(fmt(err, 6)) |")
-}
-say()
-say("- worst absolute error over the validation set: \(fmt(worstErr, 6))")
-say()
-
-// --- the actual trees ---
-struct Solved { var name: String; var tree: OrigamiTree; var res: PackingResult; var radii: [Double] }
-var solvedAll: [Solved] = []
-
-func solve(_ label: String, _ t: OrigamiTree, seed: UInt64) -> Solved {
-    let (d, names) = dmatrix(t)
-    let r = Packing.optimise(dmat: d, leafNames: names, restarts: 900, iters: 700, seed: seed)
-    let radii = names.map { r.scale * t.parentEdgeLength($0) }
-    return Solved(name: label, tree: t, res: r, radii: radii)
-}
-
-for (label, t, sd) in [("full tree, uniform edge lengths", treeUniform, UInt64(11)),
-                       ("full tree, LOC-weighted edge lengths", treeLOC, UInt64(22))] {
-    let s = solve(label, t, seed: sd)
-    solvedAll.append(s)
-    say("### \(label)")
-    say("- leaves: \(s.res.leafNames.count)")
-    say("- best certified scale m = \(fmt(s.res.scale, 6))")
-    say("- verification: all pairwise constraints re-evaluated; min slack = \(fmt(s.res.minSlack, 9)), all points inside the square: \(s.res.feasible ? "yes" : "NO")")
-    say("- binding (active) constraints: \(s.res.activePairs.count) of \(s.res.leafNames.count * (s.res.leafNames.count - 1) / 2)")
-    say()
-    say("| leaf | tree edge length | flap length (unit square) | flap length on 15cm | on 24cm |")
-    say("|---|---:|---:|---:|---:|")
-    for (i, nm) in s.res.leafNames.enumerated() {
-        let fl = s.radii[i]
-        say("| `\(nm)` | \(fmt(t.parentEdgeLength(nm))) | \(fmt(fl)) | \(fmt(fl * 15, 2)) cm | \(fmt(fl * 24, 2)) cm |")
-        _ = i
-    }
-    say()
-    say("| leaf | x | y | (unit square coordinates) |")
-    say("|---|---:|---:|---|")
-    for (i, nm) in s.res.leafNames.enumerated() {
-        say("| `\(nm)` | \(fmt(s.res.points[i].x, 5)) | \(fmt(s.res.points[i].y, 5)) | |")
-    }
-    say()
-    let svg = SVG.packingDiagram(s.res, radii: s.radii,
-                                 title: "packing (NOT a crease pattern) — \(label), m=\(fmt(s.res.scale, 4))")
-    let fn = label.contains("uniform") ? "packing-uniform.svg" : "packing-loc.svg"
-    try? svg.write(toFile: (outDir as NSString).appendingPathComponent(fn), atomically: true, encoding: .utf8)
-    say("- packing diagram written to `\(fn)`")
-    say()
-}
-
-// --- how many flaps fit at a given flap length (uniform star trees) ---
-say("### how many equal flaps a unit square supports (uniform star tree, all edges 1)")
-say("| flaps n | scale m = flap length | on 15cm square |")
-say("|---:|---:|---:|")
-for n in 2...16 {
-    var d = [[Double]](repeating: [Double](repeating: 0, count: n), count: n)
-    for i in 0..<n { for j in 0..<n where i != j { d[i][j] = 2.0 } }
-    let r = Packing.optimise(dmat: d, leafNames: (0..<n).map { "p\($0)" },
-                             restarts: 90, iters: 900, seed: UInt64(900 + n))
-    say("| \(n) | \(fmt(r.scale, 5)) | \(fmt(r.scale * 15, 2)) cm |")
-}
-say()
-
-// --- the routing-only sub-tree ---
-say("### routing sub-tree only (Router -> Home / Post / About / NotFound)")
-let star4 = OrigamiTree(root: "Router", edges: [
-    TreeEdge(parent: "Router", child: "Home", length: 1, provenance: "one route"),
-    TreeEdge(parent: "Router", child: "Post", length: 1, provenance: "one route"),
-    TreeEdge(parent: "Router", child: "About", length: 1, provenance: "one route"),
-    TreeEdge(parent: "Router", child: "NotFound", length: 1, provenance: "one route")
-])
-let s4 = solve("routing star", star4, seed: 77)
-say("- best certified scale m = \(fmt(s4.res.scale, 6)) (exact optimum is 1/2; four points at the four corners)")
-say("- min slack after verification: \(fmt(s4.res.minSlack, 9))")
-say("- active constraints: \(s4.res.activePairs.count) (the four sides of the square)")
-say()
-
-// ---------------------------------------------------------------- step 4: crease pattern
-say("# STEP 4 — crease pattern for the routing sub-tree")
-say()
-
-let st = Origami.selfTestDegree4()
-say("### self-test of the flat-foldability checker")
-say("- degree-4 vertex, four 90-degree sectors: checker accepts \(st.accepted) of 16 M/V assignments (textbook answer: \(st.expected)); breakdown \(st.detail)")
-say("- checker \(st.accepted == st.expected ? "AGREES" : "DISAGREES") with the textbook result")
-say()
-
-let valid = Origami.squareMoleculeValidAssignments()
-say("### square molecule (four corner flaps of length 1/2, all four paper edges active)")
-say("- M/V assignments of the 8 creases that pass the crimp test: \(valid.count) of 256")
-var byM: [Int: Int] = [:]
-for a in valid { byM[a.filter { $0 == 1 }.count, default: 0] += 1 }
-say("- grouped by mountain count: " + byM.keys.sorted().map { "M=\($0): \(byM[$0]!)" }.joined(separator: ", "))
-say("- a 4-fold symmetric assignment (4 mountains on the diagonals, 4 valleys on the hinges) is \(valid.contains { $0 == [-1, 1, -1, 1, -1, 1, -1, 1] } ? "valid" : "NOT valid — Maekawa forbids |M-V| = 0")")
-say()
-
-// Prefer the most readable valid assignment: all four corner bisectors the same, and
-// the hinges as uniform as Maekawa allows.  Order is [hingeR, bisNE, hingeT, bisNW,
-// hingeL, bisSW, hingeB, bisSE].
-let preferred = [1, -1, 1, -1, 1, -1, -1, -1]
-if let chosen = (valid.contains(preferred) ? preferred : valid.first) {
-    let creases = Origami.squareMolecule(mv: chosen)
-    let checks = [Origami.analyseVertex(at: Point(x: 0.5, y: 0.5), creases: creases)].compactMap { $0 }
-    say("### verification of the emitted crease pattern")
-    say("- interior vertices: \(checks.count) (the four hinge endpoints lie on the paper boundary, where neither theorem applies)")
-    for c in checks {
-        say("- vertex (\(fmt(c.at.x, 3)), \(fmt(c.at.y, 3))): degree \(c.degree), sectors \(c.sectors.map { fmt($0, 2) }.joined(separator: "/"))")
-        say("  - Kawasaki: alternating sum = \(fmt(c.kawasakiAlternatingSum, 9)) -> \(c.kawasakiOK ? "SATISFIED" : "VIOLATED")")
-        say("  - Maekawa: M = \(c.mountains), V = \(c.valleys), |M-V| = \(abs(c.mountains - c.valleys)) -> \(c.maekawaOK ? "SATISFIED" : "VIOLATED")")
-        say("  - single-vertex M/V flat-foldability (crimp reduction): \(c.mvFoldable ? "FOLDABLE" : "NOT FOLDABLE")")
-    }
-    let allOK = checks.allSatisfy { $0.kawasakiOK && $0.maekawaOK && $0.mvFoldable }
-    say("- overall: \(allOK ? "all interior vertices pass all three checks" : "SOME CHECK FAILED — crease pattern withheld")")
-    say()
-    say("- assignment used (cyclic from the right-edge hinge): " +
-        zip(creases, chosen).map { "\($0.1 == 1 ? "M" : "V"):\($0.0.note)" }.joined(separator: "; "))
-    if allOK {
-        let svg = SVG.creasePattern(creases, title: "square molecule / 4-flap uniaxial base — routing tree (Home, Post, About, NotFound)")
-        try? svg.write(toFile: (outDir as NSString).appendingPathComponent("cp-routing.svg"),
-                       atomically: true, encoding: .utf8)
-        say("- crease pattern written to `cp-routing.svg`")
-    }
-    say()
-}
-
-try? report.write(toFile: (outDir as NSString).appendingPathComponent("report.md"),
-                  atomically: true, encoding: .utf8)
+write("report.md", report)
+if opts.quiet { print("wrote \(opts.outDir)/report.md") }
