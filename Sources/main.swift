@@ -11,6 +11,24 @@ guard let opts = CLI.parse(CommandLine.arguments) else {
     print(CLI.usage)
     exit(1)
 }
+if opts.selfTest {
+    var failed = 0
+    let d4 = Origami.selfTestDegree4()
+    let d4ok = d4.accepted == d4.expected
+    if !d4ok { failed += 1 }
+    print("\(d4ok ? "ok  " : "FAIL") degree-4 crimp test: \(d4.accepted)/\(d4.expected) assignments accepted (\(d4.detail))")
+    let sq = Origami.squareMoleculeValidAssignments()
+    let sqok = !sq.isEmpty
+    if !sqok { failed += 1 }
+    print("\(sqok ? "ok  " : "FAIL") square molecule: \(sq.count) flat-foldable M/V assignments")
+    for t in UM.selfTest() {
+        if !t.ok { failed += 1 }
+        print("\(t.ok ? "ok  " : "FAIL") \(t.name): \(t.detail)")
+    }
+    print(failed == 0 ? "all self-tests passed" : "\(failed) self-test(s) FAILED")
+    exit(failed == 0 ? 0 : 1)
+}
+
 guard let (srcDir, tempClone) = CLI.resolveSource(opts.source) else {
     FileHandle.standardError.write("cannot resolve source: \(opts.source)\n".data(using: .utf8)!)
     exit(1)

@@ -296,3 +296,160 @@ enum UM {
         return nil
     }
 }
+
+// MARK: - self-test
+
+extension UM {
+
+    /// Cases with known answers, so a build can be checked without a repository.
+    /// Run with `origami --self-test`.
+    static func selfTest() -> [(name: String, ok: Bool, detail: String)] {
+        var out: [(name: String, ok: Bool, detail: String)] = []
+
+        func requiredMatrix(_ n: Int, _ f: (Int, Int) -> Double) -> [[Double]] {
+            var r = [[Double]](repeating: [Double](repeating: 0, count: n), count: n)
+            for i in 0..<n {
+                for j in 0..<n where i != j { r[i][j] = f(i, j) }
+            }
+            return r
+        }
+
+        /// Degree of every crease endpoint strictly inside `poly`, counting the odd ones.
+        /// `Molecule.hingeMismatches` cannot be used here: it treats the unit square as the
+        /// paper, and these test polygons are not inside it.
+        func oddDegreeInside(_ creases: [Crease], _ poly: [Point]) -> Int {
+            let n = poly.count
+            func strictlyInside(_ q: Point) -> Bool {
+                for i in 0..<n {
+                    if crs(sub(poly[(i + 1) % n], poly[i]), sub(q, poly[i])) <= 1e-9 { return false }
+                }
+                return true
+            }
+            var pts: [Point] = []
+            for c in creases {
+                for q in [c.a, c.b] where strictlyInside(q) {
+                    if !pts.contains(where: { len(sub($0, q)) < 1e-9 }) { pts.append(q) }
+                }
+            }
+            var odd = 0
+            for v in pts {
+                var deg = 0
+                for c in creases where len(sub(c.a, v)) < 1e-9 || len(sub(c.b, v)) < 1e-9 { deg += 1 }
+                if deg % 2 == 1 { odd += 1 }
+            }
+            return odd
+        }
+
+        func run(_ name: String, _ poly: [Point], _ req: [[Double]],
+                 expectFill: Bool, expectEvents: Int?, expectCentre: Point?) {
+            if let bad = axialViolation(polygon: poly, required: req) {
+                out.append((name, false, "not an axial polygon to begin with: \(bad)"))
+                return
+            }
+            let m = molecule(polygon: poly, required: req)
+            if !expectFill {
+                out.append((name, !m.ok, m.ok ? "was filled, but should have been refused"
+                                              : "refused as expected — \(m.reason)"))
+                return
+            }
+            guard m.ok else {
+                out.append((name, false, "refused: \(m.reason)"))
+                return
+            }
+            var detail = "\(m.creases.count) creases"
+            var ok = true
+            if let c = expectCentre {
+                let hit = m.creases.contains { len(sub($0.a, c)) < 1e-6 || len(sub($0.b, c)) < 1e-6 }
+                if !hit { ok = false; detail += "; expected a crease at (\(fmt(c.x)), \(fmt(c.y)))" }
+            }
+            if let e = expectEvents, m.creases.count != e {
+                ok = false
+                detail += "; expected \(e) creases"
+            }
+            // every vertex strictly inside the polygon must have even degree, or no flat
+            // folding exists no matter how the creases are assigned
+            let odd = oddDegreeInside(Molecule.splitAtPoints(m.creases), poly)
+            if odd > 0 { ok = false; detail += "; \(odd) odd-degree interior vertex/vertices" }
+            out.append((name, ok, detail))
+        }
+
+        // 1. equilateral triangle: three leaves of length 1 on a common node, m = 1.
+        //    Expect the rabbit ear -- 3 ridges to the incentre and 3 hinges.
+        let s = 2.0
+        let tri = [Point(x: 0, y: 0), Point(x: s, y: 0),
+                   Point(x: s / 2, y: s * (3.0).squareRoot() / 2)]
+        run("rabbit ear (equilateral triangle)", tri, requiredMatrix(3) { _, _ in 2.0 },
+            expectFill: true, expectEvents: 6,
+            expectCentre: Point(x: 1.0, y: 1.0 / (3.0).squareRoot()))
+
+        // 2. unit square, four leaves of length 1/2 on a common node.
+        //    Expect the preliminary-base molecule: 4 diagonals + 4 hinges to the midpoints.
+        let sq = [Point(x: 0, y: 0), Point(x: 1, y: 0), Point(x: 1, y: 1), Point(x: 0, y: 1)]
+        run("square molecule (star4)", sq,
+            requiredMatrix(4) { i, j in ((i - j) % 4 == 0) ? 0 : (abs(i - j) == 2 ? (2.0).squareRoot() : 1.0) },
+            expectFill: true, expectEvents: 8, expectCentre: Point(x: 0.5, y: 0.5))
+
+        // 3. scalene triangle: still one event, still the rabbit ear.
+        let sc = [Point(x: 0, y: 0), Point(x: 3, y: 0), Point(x: 0.7, y: 2.2)]
+        run("rabbit ear (scalene triangle)", sc,
+            requiredMatrix(3) { i, j in len(sub(sc[i], sc[j])) },
+            expectFill: true, expectEvents: 6, expectCentre: nil)
+
+        // 4. a quadrilateral spanning a river: A,B on P (1,1), C,D on Q (1,2), P-Q = 1.
+        //    It satisfies the path condition, but its reduction needs a gusset, so the
+        //    molecule must be REFUSED rather than filled with something unverifiable.
+        let th = 75.0 * Double.pi / 180
+        let qa = Point(x: 0, y: 0)
+        let qb = Point(x: 2, y: 0)
+        let qc = Point(x: 2 + 3 * cos(th), y: 3 * sin(th))
+        let lc = len(qc)
+        let xx = (16 - 9 + lc * lc) / (2 * lc)
+        let hh = (max(0.0, 16 - xx * xx)).squareRoot()
+        let uc = mul(qc, 1 / lc)
+        let qd = add(mul(uc, xx), mul(Point(x: -uc.y, y: uc.x), hh))
+        let river = [[0.0, 2.0, 3.0, 4.0],
+                     [2.0, 0.0, 3.0, 4.0],
+                     [3.0, 3.0, 0.0, 3.0],
+                     [4.0, 4.0, 3.0, 0.0]]
+        run("river quad must be refused", [qa, qb, qc, qd], river,
+            expectFill: false, expectEvents: nil, expectCentre: nil)
+
+        // 5. a quadrilateral with no inscribed circle whose reduction *is* driven by
+        //    contraction alone -- two events, a ridge segment between them.  The old
+        //    inscribed-circle molecule could not express this at all.  The consistent tree
+        //    is read off the polygon's own skeleton: a = t1*c_A and so on.
+        let quad = [Point(x: 0, y: 0), Point(x: 2.2, y: 0),
+                    Point(x: 3.0, y: 2.4), Point(x: 0.4, y: 2.0)]
+        if let (bs1, cs1) = bisectors(quad) {
+            var t1 = Double.infinity
+            var e1 = (0, 0)
+            for i in 0..<4 {
+                let j = (i + 1) % 4
+                let rate = cs1[i] + cs1[j]
+                if rate > 1e-12 {
+                    let t = len(sub(quad[i], quad[j])) / rate
+                    if t < t1 { t1 = t; e1 = (i, j) }
+                }
+            }
+            var leaf = cs1.map { t1 * $0 }
+            var moved: [Point] = []
+            for i in 0..<4 { moved.append(add(quad[i], mul(bs1[i], t1))) }
+            let keep = (0..<4).filter { $0 != e1.1 }
+            let triangle = keep.map { moved[$0] }
+            if let (_, cs2) = bisectors(triangle) {
+                let t2 = len(sub(triangle[0], triangle[1])) / (cs2[0] + cs2[1])
+                let mi = keep.firstIndex(of: e1.0) ?? 0
+                let river2 = t2 * cs2[mi]
+                for k in 0..<4 where k != e1.0 && k != e1.1 { leaf[k] += t2 * cs1[k] }
+                let onP = Set([e1.0, e1.1])
+                let req = requiredMatrix(4) { i, j in
+                    leaf[i] + leaf[j] + (onP.contains(i) == onP.contains(j) ? 0 : river2)
+                }
+                run("non-tangential quad, contraction only", quad, req,
+                    expectFill: true, expectEvents: nil, expectCentre: nil)
+            }
+        }
+
+        return out
+    }
+}

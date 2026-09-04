@@ -18,6 +18,7 @@ struct Options {
     var corners: CornerPolicy = .auto
     var cornerKeep = 0.98
     var cornerFlapLength: Double? = nil
+    var selfTest = false
 }
 
 /// What to do about paper corners that no leaf node occupies.
@@ -69,6 +70,7 @@ enum CLI {
                               length actually used is the largest one that costs no scale at
                               all, capped by this
       --corner-flaps          alias for --corners flaps
+      --self-test             run the geometry self-tests and exit (no source needed)
       --keep-clone            do not delete a repository cloned into a temp directory
       -h, --help              this text
     """
@@ -95,6 +97,7 @@ enum CLI {
             case "--corner-keep": o.cornerKeep = Double(next() ?? "") ?? o.cornerKeep
             case "--corner-flaps": o.corners = .flaps
             case "--corner-flap-length": o.cornerFlapLength = Double(next() ?? "")
+            case "--self-test": o.selfTest = true
             case "--keep-clone": o.keepClone = true
             case "-q", "--quiet": o.quiet = true
             default:

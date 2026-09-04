@@ -53,10 +53,19 @@ swift build -c release     # -> .build/release/origami
 
 ```sh
 make check
+# => ok   degree-4 crimp test: 8/8 assignments accepted (M=1:4, M=3:4)
+# => ok   rabbit ear (equilateral triangle): 6 creases
+# => ok   square molecule (star4): 8 creases
+# => ok   river quad must be refused: refused as expected — ...
+# => ok   non-tangential quad, contraction only: ...
+# => all self-tests passed
 # => OK: verified crease pattern emitted for examples/star4
 ```
 
-これが通れば、ソルバも幾何の検証器も正しく動いています。
+これが通れば、ソルバも幾何の検証器も分子生成器も正しく動いています。
+自己テストだけを走らせるなら `./bin/origami --self-test`（リポジトリ不要）。
+既知解のケース（rabbit ear / square molecule / 内接円を持たない四角形）に加えて、
+**gusset が必要な面がきちんと「拒否」されること**も検査しています。
 
 ### 4. 自分のリポジトリを読ませる
 
