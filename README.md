@@ -5,8 +5,85 @@ Elm のコードベースを読み込み、その構造を **Lang の tree metho
 
 全体 **Swift**（`Sources/*.swift`、外部依存なし・Foundation のみ）。
 
+---
+
+## セットアップ
+
+### 1. Swift を用意する
+
+依存は Swift 5.7 以降と Foundation だけ。パッケージは一切使いません。
+
+**macOS** — Xcode が入っていれば済んでいます。入っていなければ:
+
 ```sh
-swiftc -O Sources/*.swift -o bin/origami
+xcode-select --install     # Command Line Tools だけでも可
+swift --version            # 5.7 以上なら OK
+```
+
+**Linux (Ubuntu / Fedora など)** — 公式 toolchain を入れます:
+
+```sh
+curl -sL https://swiftlang.github.io/swiftly/swiftly-install.sh | bash
+swiftly install latest
+swift --version
+```
+
+（`swiftly` が使えない環境なら <https://www.swift.org/install/linux/> から tarball を落として
+`/opt/swift` に展開し、`export PATH=/opt/swift/usr/bin:$PATH` でも動きます。）
+
+**Windows** — WSL2 上で Linux の手順を使うのが確実です。
+
+### 2. 取得してビルド
+
+```sh
+git clone https://github.com/1000ldk/origami-elm
+cd origami-elm
+make                       # -> bin/origami
+```
+
+SwiftPM を使いたい場合はこちらでも同じものができます:
+
+```sh
+swift build -c release     # -> .build/release/origami
+```
+
+### 3. ビルドが正しいことを確認する
+
+同梱の4葉サンプルは、**検証済みの展開図が必ず出る**ことが分かっているケースです。
+
+```sh
+make check
+# => OK: verified crease pattern emitted for examples/star4
+```
+
+これが通れば、ソルバも幾何の検証器も正しく動いています。
+
+### 4. 自分のリポジトリを読ませる
+
+```sh
+./bin/origami ~/dev/my-elm-app -o out        # ローカルのディレクトリ
+./bin/origami 1000ldk/elm-web -o out         # GitHub の owner/repo（clone して解析、終了時に破棄）
+./bin/origami https://github.com/... -o out  # 任意の git URL
+open out/report.md out/packing.svg           # Linux なら xdg-open
+```
+
+`git` は `owner/repo` や URL を渡したときだけ必要です（ローカルディレクトリなら不要）。
+ネットワークアクセスもそのときだけです。
+
+### トラブルシューティング
+
+| 症状 | 対処 |
+|---|---|
+| `no .elm files found under ...` | `src/` ではなくリポジトリのルートを渡していないか確認。`elm-stuff/` と `tests/` は除外されます |
+| `could not determine a root module` | `Main` が無いリポジトリです。`--root MyEntryModule` で指定してください |
+| `cannot resolve source: ...` | `git clone` に失敗しています。private リポジトリなら先に自分で clone してローカルパスを渡してください |
+| 実行が遅い | 既定は `--restarts 250`。試行錯誤中は `--restarts 40` で十分です |
+
+---
+
+## 使い方
+
+```sh
 ./bin/origami <source> [options]
 ```
 
