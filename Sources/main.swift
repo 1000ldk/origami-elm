@@ -83,7 +83,7 @@ bo.granularity = opts.granularity
 bo.sharedPolicy = opts.sharedPolicy
 bo.dropUnusedImports = opts.dropUnusedImports
 bo.rootHint = opts.rootHint
-bo.uniformLengths = opts.uniform
+bo.lengthScale = opts.lengthScale
 
 guard let built = TreeBuild.build(mods: mods, options: bo) else {
     FileHandle.standardError.write("could not determine a root module\n".data(using: .utf8)!)
@@ -91,7 +91,7 @@ guard let built = TreeBuild.build(mods: mods, options: bo) else {
 }
 var tree = built.tree
 let check = tree.validateIsTree()
-say("- granularity: `\(opts.granularity.rawValue)`, shared-module policy: `\(opts.sharedPolicy.rawValue)`, edge lengths: \(opts.uniform ? "uniform" : "code-size")")
+say("- granularity: `\(opts.granularity.rawValue)`, shared-module policy: `\(opts.sharedPolicy.rawValue)`, edge lengths: `\(opts.lengthScale.rawValue)`")
 for n in built.notes { say("- \(n)") }
 if !built.deadImports.isEmpty {
     say("- imports with no reference found in the body: " +

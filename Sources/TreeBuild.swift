@@ -7,13 +7,22 @@ import Foundation
 enum Granularity: String { case module, view }
 enum SharedPolicy: String { case duplicate, hinge }
 
+/// How code size becomes a tree-edge length.
+///
+/// The map only has to be monotone -- nothing in the geometry cares which one -- but the
+/// choice decides whether the packing is usable.  `code` (loc/10) keeps the raw ratios, so
+/// one 120-line module against a 7-line view gives edges of 12.0 against 0.7: that flap's
+/// circle comes out larger than the sheet and every other flap is squeezed into a corner.
+/// `log` compresses the same ordering into a range a square can actually hold.
+enum LengthScale: String { case code, uniform, log }
+
 struct BuildOptions {
     var granularity: Granularity = .view
     var sharedPolicy: SharedPolicy = .duplicate
     var dropUnusedImports = false
     var rootHint: String? = nil
     var nodeCap = 400
-    var uniformLengths = false
+    var lengthScale: LengthScale = .code
 }
 
 struct BuildResult {
@@ -159,8 +168,16 @@ enum TreeBuild {
         }
 
         // ---- lengths ----
+        func scaled(_ loc: Double) -> (Double, String) {
+            switch opts.lengthScale {
+            case .uniform: return (1.0, "uniform 1.0")
+            case .code:    return (max(0.5, loc / 10), "/ 10")
+            case .log:     return (max(0.5, log2(1 + loc) / 2), "-> log2(1+n)/2")
+            }
+        }
+
         func lengthFor(_ id: String) -> (Double, String) {
-            if opts.uniformLengths { return (1.0, "uniform 1.0") }
+            if opts.lengthScale == .uniform { return (1.0, "uniform 1.0") }
             if leafKind[id] == "view decl" {
                 // "Module~k.decl"
                 let parts = id.split(separator: ".")
@@ -169,15 +186,15 @@ enum TreeBuild {
                 let module = origin[String(nodeId)] ?? ""
                 let k = max(1, copies[module] ?? 1)
                 let loc = mods[module]?.viewDecls.first { $0.name == declName }?.codeLines ?? 0
-                let v = Double(loc) / Double(k)
-                return (max(0.5, v / 10), "\(loc) code lines of `\(module).\(declName)`" + (k > 1 ? " / \(k) copies" : "") + " / 10")
+                let (v, how) = scaled(Double(loc) / Double(k))
+                return (v, "\(loc) code lines of `\(module).\(declName)`" + (k > 1 ? " / \(k) copies" : "") + " \(how)")
             }
             let module = origin[id] ?? ""
             let k = max(1, copies[module] ?? 1)
             let loc = opts.granularity == .view ? (mods[module]?.nonViewLOC ?? 0) : (mods[module]?.codeLines ?? 0)
             let label = opts.granularity == .view ? "non-rendering code lines" : "code lines"
-            let v = Double(loc) / Double(k)
-            return (max(0.5, v / 10), "\(loc) \(label) of `\(module)`" + (k > 1 ? " / \(k) copies" : "") + " / 10")
+            let (v, how) = scaled(Double(loc) / Double(k))
+            return (v, "\(loc) \(label) of `\(module)`" + (k > 1 ? " / \(k) copies" : "") + " \(how)")
         }
 
         edges = edges.map { e in

@@ -180,10 +180,6 @@ enum UM {
         if kind.isEmpty || !tBest.isFinite || tBest < -1e-9 {
             return (false, "the inset has no next event; the face cannot be reduced")
         }
-        if kind == "split" {
-            return (false, "a gusset (river) event occurs at inset \(fmt(tBest)), between reduced vertices \(ev.0) and \(ev.1), before any side contracts; the general river molecule is not implemented")
-        }
-
         var moved: [Point] = []
         for i in 0..<n { moved.append(add(pts[i], mul(bs[i], tBest))) }
         for i in 0..<n where len(sub(pts[i], moved[i])) > 1e-12 {
@@ -192,6 +188,53 @@ enum UM {
         var rr = R
         for a in 0..<n {
             for b in 0..<n where a != b { rr[a][b] -= tBest * (cs[a] + cs[b]) }
+        }
+
+        if kind == "split" {
+            // A gusset: the path between two non-adjacent vertices has become tight, so it
+            // is now an active path and cuts the polygon in two.  Each half is again an
+            // axial polygon, at elevation tBest rather than 0, and is reduced on its own.
+            //
+            // This is right exactly when the two halves put their hinges on the gusset at
+            // the same point.  They do when the two halves' median tree nodes agree -- a
+            // star tree, for instance, where every median is the single branch node.  They
+            // do not when a river runs along the gusset, because then the halves land on
+            // *different* branch nodes of that river and each foot has no partner.  Rather
+            // than guess, the molecule is built and then checked: see `molecule`, which
+            // refuses a face whose interior vertices come out odd or fail Kawasaki.
+            let (i, j) = ev
+            let gusset = (moved[i], moved[j])
+            creases.append(Crease(a: moved[i], b: moved[j], fold: .valley, note: "gusset"))
+
+            var leftIdx: [Int] = []
+            var leftBase: [(Point, Point)] = []
+            for k in i...j { leftIdx.append(k) }
+            for k in i..<j { leftBase.append(base[k]) }
+            leftBase.append(gusset)
+
+            var rightIdx: [Int] = []
+            var rightBase: [(Point, Point)] = []
+            for k in j..<n { rightIdx.append(k) }
+            for k in 0...i { rightIdx.append(k) }
+            for k in j..<n { rightBase.append(base[k]) }
+            for k in 0..<i { rightBase.append(base[k]) }
+            rightBase.append(gusset)
+
+            func slice(_ idx: [Int]) -> (pts: [Point], R: [[Double]]) {
+                var p: [Point] = []
+                var r = [[Double]](repeating: [Double](repeating: 0, count: idx.count),
+                                   count: idx.count)
+                for (a, ka) in idx.enumerated() {
+                    p.append(moved[ka])
+                    for (b, kb) in idx.enumerated() where a != b { r[a][b] = rr[ka][kb] }
+                }
+                return (p, r)
+            }
+            let lhs = slice(leftIdx)
+            let rhs = slice(rightIdx)
+            let l = inset(pts: lhs.pts, base: leftBase, R: lhs.R, depth: depth + 1, into: &creases)
+            if !l.ok { return l }
+            return inset(pts: rhs.pts, base: rightBase, R: rhs.R, depth: depth + 1, into: &creases)
         }
 
         // group maximal runs of vertices that have just become coincident
@@ -271,7 +314,55 @@ enum UM {
         for i in 0..<n { base.append((polygon[i], polygon[(i + 1) % n])) }
         var creases: [Crease] = []
         let r = inset(pts: polygon, base: base, R: required, depth: 0, into: &creases)
-        return (r.ok ? creases : [], r.ok, r.reason)
+        guard r.ok else { return ([], false, r.reason) }
+        if let bad = interiorInconsistency(creases, polygon: polygon) {
+            return ([], false, bad)
+        }
+        return (creases, true, "")
+    }
+
+    /// Does the finished molecule fold?  Every vertex strictly inside the face must have
+    /// even degree and a zero alternating sum, or no flat folding exists however the
+    /// creases are assigned.  This is what lets a gusset be attempted rather than refused:
+    /// the split is performed, and a split that does not work out is caught here.
+    static func interiorInconsistency(_ creases: [Crease], polygon: [Point]) -> String? {
+        let n = polygon.count
+        func strictlyInside(_ q: Point) -> Bool {
+            for i in 0..<n {
+                if crs(sub(polygon[(i + 1) % n], polygon[i]), sub(q, polygon[i])) <= 1e-9 {
+                    return false
+                }
+            }
+            return true
+        }
+        let split = Molecule.splitAtPoints(creases)
+        var pts: [Point] = []
+        for c in split {
+            for q in [c.a, c.b] where strictlyInside(q) {
+                if !pts.contains(where: { len(sub($0, q)) < 1e-9 }) { pts.append(q) }
+            }
+        }
+        for v in pts {
+            var angles: [Double] = []
+            for c in split {
+                if len(sub(c.a, v)) < 1e-9 { angles.append(atan2(c.b.y - v.y, c.b.x - v.x)) }
+                else if len(sub(c.b, v)) < 1e-9 { angles.append(atan2(c.a.y - v.y, c.a.x - v.x)) }
+            }
+            if angles.count % 2 == 1 {
+                return "the molecule has an interior vertex of odd degree \(angles.count) at (\(fmt(v.x)), \(fmt(v.y))); the two sides of a gusset put their hinges on it at different points, which needs the general river molecule"
+            }
+            angles.sort()
+            var alt = 0.0
+            for k in 0..<angles.count {
+                var d = angles[(k + 1) % angles.count] - angles[k]
+                while d <= 0 { d += 2 * Double.pi }
+                alt += (k % 2 == 0 ? d : -d)
+            }
+            if abs(alt) > 1e-6 {
+                return "Kawasaki fails inside the molecule at (\(fmt(v.x)), \(fmt(v.y))): alternating sum \(fmt(alt * 180 / Double.pi)) degrees"
+            }
+        }
+        return nil
     }
 
     /// Check that a face really is an axial polygon before trying to fill it.
@@ -314,32 +405,6 @@ extension UM {
             return r
         }
 
-        /// Degree of every crease endpoint strictly inside `poly`, counting the odd ones.
-        /// `Molecule.hingeMismatches` cannot be used here: it treats the unit square as the
-        /// paper, and these test polygons are not inside it.
-        func oddDegreeInside(_ creases: [Crease], _ poly: [Point]) -> Int {
-            let n = poly.count
-            func strictlyInside(_ q: Point) -> Bool {
-                for i in 0..<n {
-                    if crs(sub(poly[(i + 1) % n], poly[i]), sub(q, poly[i])) <= 1e-9 { return false }
-                }
-                return true
-            }
-            var pts: [Point] = []
-            for c in creases {
-                for q in [c.a, c.b] where strictlyInside(q) {
-                    if !pts.contains(where: { len(sub($0, q)) < 1e-9 }) { pts.append(q) }
-                }
-            }
-            var odd = 0
-            for v in pts {
-                var deg = 0
-                for c in creases where len(sub(c.a, v)) < 1e-9 || len(sub(c.b, v)) < 1e-9 { deg += 1 }
-                if deg % 2 == 1 { odd += 1 }
-            }
-            return odd
-        }
-
         func run(_ name: String, _ poly: [Point], _ req: [[Double]],
                  expectFill: Bool, expectEvents: Int?, expectCentre: Point?) {
             if let bad = axialViolation(polygon: poly, required: req) {
@@ -366,10 +431,12 @@ extension UM {
                 ok = false
                 detail += "; expected \(e) creases"
             }
-            // every vertex strictly inside the polygon must have even degree, or no flat
-            // folding exists no matter how the creases are assigned
-            let odd = oddDegreeInside(Molecule.splitAtPoints(m.creases), poly)
-            if odd > 0 { ok = false; detail += "; \(odd) odd-degree interior vertex/vertices" }
+            // molecule() has already checked the interior vertices; re-state it here so a
+            // failure names the case
+            if let bad = interiorInconsistency(m.creases, polygon: poly) {
+                ok = false
+                detail += "; \(bad)"
+            }
             out.append((name, ok, detail))
         }
 
@@ -396,8 +463,9 @@ extension UM {
             expectFill: true, expectEvents: 6, expectCentre: nil)
 
         // 4. a quadrilateral spanning a river: A,B on P (1,1), C,D on Q (1,2), P-Q = 1.
-        //    It satisfies the path condition, but its reduction needs a gusset, so the
-        //    molecule must be REFUSED rather than filled with something unverifiable.
+        //    A gusset event fires and the split is attempted, but the two halves land their
+        //    hinges on different branch nodes of the river, so the check in `molecule`
+        //    rejects it.  It must come out REFUSED, not filled.
         let th = 75.0 * Double.pi / 180
         let qa = Point(x: 0, y: 0)
         let qb = Point(x: 2, y: 0)
@@ -449,6 +517,18 @@ extension UM {
                     expectFill: true, expectEvents: nil, expectCentre: nil)
             }
         }
+
+        // 6. the face from 1000ldk/origami-test-elm: four leaves on one node (a star tree,
+        //    so no river anywhere), lengths 0.7 / 12.0 / 0.7 / 0.8.  A gusset event fires,
+        //    and here the split IS correct -- both halves put their hinge on the gusset at
+        //    the single branch node.  It must come out FILLED.
+        let mm = ((9 + 4 * 159.04 * 2).squareRoot() - 3) / (2 * 159.04)
+        let leafLen = [0.7, 12.0, 0.7, 0.8]     // itemCard, Data, tabButton, view
+        let star = [Point(x: 1.5 * mm, y: 0), Point(x: 1, y: 1),
+                    Point(x: 0, y: 1.5 * mm), Point(x: 0, y: 0)]
+        run("star tree, gusset that works", star,
+            requiredMatrix(4) { i, j in mm * (leafLen[i] + leafLen[j]) },
+            expectFill: true, expectEvents: nil, expectCentre: nil)
 
         return out
     }

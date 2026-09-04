@@ -8,7 +8,7 @@ struct Options {
     var granularity: Granularity = .view
     var sharedPolicy: SharedPolicy = .duplicate
     var dropUnusedImports = false
-    var uniform = false
+    var lengthScale: LengthScale = .code
     var rootHint: String? = nil
     var restarts = 250
     var paperMM = 150.0
@@ -50,7 +50,14 @@ enum CLI {
                               how to break a module imported by several parents
                               (default duplicate)
       --drop-unused-imports   ignore imports with no reference in the body
-      --uniform               give every tree edge length 1 instead of using code size
+      --lengths code|uniform|log
+                              how code size becomes an edge length
+                              code    (default): lines / 10
+                              log     : log2(1 + lines) / 2 -- same ordering, but keeps one
+                                        huge module from producing a flap bigger than the
+                                        sheet and starving every other flap
+                              uniform : every edge 1
+      --uniform               alias for --lengths uniform
       --root MODULE           force the entry module (default: Main, else inferred)
       --restarts N            packing solver restarts (default 250)
       --paper MM              paper side length used for the centimetre columns (default 150)
@@ -88,7 +95,8 @@ enum CLI {
             case "--granularity": o.granularity = Granularity(rawValue: next() ?? "") ?? .view
             case "--shared": o.sharedPolicy = SharedPolicy(rawValue: next() ?? "") ?? .duplicate
             case "--drop-unused-imports": o.dropUnusedImports = true
-            case "--uniform": o.uniform = true
+            case "--lengths": o.lengthScale = LengthScale(rawValue: next() ?? "") ?? .code
+            case "--uniform": o.lengthScale = .uniform
             case "--root": o.rootHint = next()
             case "--restarts": o.restarts = Int(next() ?? "") ?? o.restarts
             case "--paper": o.paperMM = Double(next() ?? "") ?? o.paperMM
