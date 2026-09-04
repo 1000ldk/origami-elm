@@ -67,6 +67,9 @@ struct OrigamiTree {
         return dist[b] ?? .infinity
     }
 
+    /// Weighted distance from the root to a node.
+    func depthOf(_ node: String) -> Double { distance(root, node) }
+
     func validateIsTree() -> (ok: Bool, message: String) {
         let n = nodes.count
         let e = edges.count
@@ -85,5 +88,54 @@ struct OrigamiTree {
         }
         if seen.count != n { return (false, "graph is not connected from root (\(seen.count)/\(n))") }
         return (true, "single-rooted tree: \(n) nodes, \(e) edges, \(leaves.count) leaves")
+    }
+}
+
+/// All-pairs weighted distances between tree nodes, computed once.
+///
+/// `OrigamiTree.distance` rebuilds the adjacency list on every call, which is fine for a
+/// report but far too slow inside the molecule recursion, where distances between
+/// arbitrary nodes are needed repeatedly.
+struct TreeMetric {
+    private let index: [String: Int]
+    private let d: [[Double]]
+    let names: [String]
+
+    init(_ t: OrigamiTree) {
+        var adj: [String: [(String, Double)]] = [:]
+        for e in t.edges {
+            adj[e.parent, default: []].append((e.child, e.length))
+            adj[e.child, default: []].append((e.parent, e.length))
+        }
+        let ns = t.nodes
+        names = ns
+        var idx: [String: Int] = [:]
+        for (i, n) in ns.enumerated() { idx[n] = i }
+        index = idx
+
+        var m = [[Double]](repeating: [Double](repeating: .infinity, count: ns.count),
+                           count: ns.count)
+        for (i, s) in ns.enumerated() {
+            var dist = [Double](repeating: .infinity, count: ns.count)
+            dist[i] = 0
+            var stack = [s]
+            while let n = stack.popLast() {
+                guard let ni = idx[n] else { continue }
+                for (o, w) in adj[n] ?? [] {
+                    guard let oi = idx[o] else { continue }
+                    if dist[oi].isInfinite {
+                        dist[oi] = dist[ni] + w
+                        stack.append(o)
+                    }
+                }
+            }
+            m[i] = dist
+        }
+        d = m
+    }
+
+    func dist(_ a: String, _ b: String) -> Double {
+        guard let i = index[a], let j = index[b] else { return .infinity }
+        return d[i][j]
     }
 }

@@ -4,16 +4,24 @@
 // Pipeline:
 //   1. active-path graph   -- leaf pairs whose distance constraint is tight
 //   2. planar subdivision  -- those segments plus the paper boundary cut the square into faces
-//   3. molecules           -- each face that admits an inscribed circle gets the "tangential
-//                             polygon" molecule (the triangle case of which is the rabbit ear,
-//                             and the square case of which is the preliminary-base molecule)
+//   3. molecules           -- each face that is an *axial polygon* (every side an active
+//                             path) is filled by the universal molecule in
+//                             UniversalMolecule.swift, computed from the tree, not from
+//                             the face's geometry alone
 //   4. assembly            -- molecule creases plus the interior active paths (axial creases)
 //   5. M/V assignment      -- backtracking search, every vertex checked with Origami's crimp test
 //   6. verification        -- Kawasaki / Maekawa / crimp at EVERY interior vertex
 //
-// A face that is not tangential needs a gusset (the general universal molecule), which is not
-// implemented.  Such faces are left unfilled and reported; the output is then labelled a
-// partial molecule map, not a crease pattern.
+// A face that is not an axial polygon -- because a paper corner or a stretch of the paper
+// boundary bounds it -- has no molecule at all, and a face whose reduction needs a river
+// (gusset) is not implemented.  Such faces are left unfilled and reported; the output is
+// then labelled a partial molecule map, not a crease pattern.
+//
+// Nothing here fills a face without consulting the tree.  The previous version fitted an
+// inscribed circle to any face, which silently accepted every triangle -- every triangle is
+// tangential -- including triangles with a paper-boundary side, and produced molecules whose
+// hinge feet did not match the neighbouring face.  That is what made whole crease patterns
+// come out with odd-degree interior vertices.
 
 import Foundation
 
@@ -25,9 +33,10 @@ struct Seg {
 
 struct Face {
     var verts: [Int]        // in CCW order
+    var kinds: [String]     // kinds[i] is the kind of the side from verts[i] to verts[i+1]
     var area: Double
     var touchesPaperCorner: Bool
-    var allEdgesActive: Bool
+    var allEdgesActive: Bool { kinds.allSatisfy { $0 == "active" } }
 }
 
 struct MoleculeReport {
@@ -82,7 +91,41 @@ enum Molecule {
             }
         }
 
-        // de-duplicate
+        // A leaf may sit in the interior of another active path.  Unless the segment is cut
+        // there, the face walk runs straight past the leaf and the face comes out with the
+        // wrong vertex list, so split every segment at any vertex lying strictly inside it.
+        var pass = 0
+        var changed = true
+        while changed && pass < 8 {
+            changed = false
+            pass += 1
+            var next: [Seg] = []
+            for s in segs {
+                let a = verts[s.a], b = verts[s.b]
+                let dx = b.x - a.x, dy = b.y - a.y
+                let l2 = dx * dx + dy * dy
+                var cut: Int? = nil
+                if l2 > 1e-18 {
+                    for (i, p) in verts.enumerated() where i != s.a && i != s.b {
+                        let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2
+                        if t <= 1e-9 || t >= 1 - 1e-9 { continue }
+                        if hypot(a.x + t * dx - p.x, a.y + t * dy - p.y) < 1e-9 { cut = i; break }
+                    }
+                }
+                if let c = cut {
+                    next.append(Seg(a: s.a, b: c, kind: s.kind))
+                    next.append(Seg(a: c, b: s.b, kind: s.kind))
+                    changed = true
+                } else {
+                    next.append(s)
+                }
+            }
+            segs = next
+        }
+
+        // de-duplicate.  Active pairs were added first, so a path that runs along the paper
+        // edge keeps its "active" kind: it is a genuine axial edge that happens to be the
+        // boundary of the sheet.
         var seen = Set<String>()
         segs = segs.filter { s in
             let key = "\(min(s.a, s.b))-\(max(s.a, s.b))"
@@ -151,14 +194,13 @@ enum Molecule {
                 area /= 2
                 if area > eps && loop.count >= 3 {
                     let touches = loop.contains { corners.contains($0) }
-                    var allActive = true
+                    var kinds: [String] = []
                     for i in 0..<loop.count {
                         let a = loop[i], b = loop[(i + 1) % loop.count]
-                        if !segs.contains(where: { ($0.a == a && $0.b == b) || ($0.a == b && $0.b == a) ? $0.kind == "active" : false }) {
-                            allActive = false
-                        }
+                        let side = segs.first { ($0.a == a && $0.b == b) || ($0.a == b && $0.b == a) }
+                        kinds.append(side?.kind ?? "missing")
                     }
-                    out.append(Face(verts: loop, area: area, touchesPaperCorner: touches, allEdgesActive: allActive))
+                    out.append(Face(verts: loop, kinds: kinds, area: area, touchesPaperCorner: touches))
                 }
                 _ = k
             }
@@ -166,79 +208,32 @@ enum Molecule {
         return out
     }
 
-    // MARK: - the tangential-polygon molecule
-
-    /// Least-squares solve for a point equidistant from every edge line of a convex polygon.
-    /// Returns nil when no such point exists (the polygon needs a gusset instead).
-    static func inscribedCentre(_ poly: [Point]) -> (centre: Point, r: Double, residual: Double)? {
-        let k = poly.count
-        guard k >= 3 else { return nil }
-        // rows: n_i . X - r = n_i . P_i   with n_i the inward unit normal of edge i
-        var ata = [[Double]](repeating: [Double](repeating: 0, count: 3), count: 3)
-        var atb = [Double](repeating: 0, count: 3)
-        var rows: [([Double], Double)] = []
-        for i in 0..<k {
-            let p = poly[i], q = poly[(i + 1) % k]
-            let dx = q.x - p.x, dy = q.y - p.y
-            let len = hypot(dx, dy)
-            if len < 1e-12 { return nil }
-            // CCW polygon -> inward normal is the left normal of (p -> q)
-            let nx = -dy / len, ny = dx / len
-            let row = [nx, ny, -1.0]
-            let rhs = nx * p.x + ny * p.y
-            rows.append((row, rhs))
-            for a in 0..<3 {
-                for b in 0..<3 { ata[a][b] += row[a] * row[b] }
-                atb[a] += row[a] * rhs
-            }
-        }
-        // 3x3 solve (Gaussian elimination with partial pivoting)
-        var m = ata
-        var v = atb
-        for col in 0..<3 {
-            var piv = col
-            for r in (col + 1)..<3 where abs(m[r][col]) > abs(m[piv][col]) { piv = r }
-            if abs(m[piv][col]) < 1e-14 { return nil }
-            m.swapAt(col, piv); v.swapAt(col, piv)
-            for r in 0..<3 where r != col {
-                let f = m[r][col] / m[col][col]
-                for c in col..<3 { m[r][c] -= f * m[col][c] }
-                v[r] -= f * v[col]
-            }
-        }
-        let x = v[0] / m[0][0], y = v[1] / m[1][1], r = v[2] / m[2][2]
-        var residual = 0.0
-        for (row, rhs) in rows {
-            residual = max(residual, abs(row[0] * x + row[1] * y + row[2] * r - rhs))
-        }
-        if r <= 1e-9 { return nil }
-        return (Point(x: x, y: y), r, residual)
-    }
-
-    /// Creases of the molecule: a ridge crease from the centre to every polygon vertex, and a
-    /// hinge crease from the centre perpendicular to every polygon edge.
-    static func moleculeCreases(_ poly: [Point], centre: Point) -> [Crease] {
-        var out: [Crease] = []
-        for p in poly {
-            out.append(Crease(a: centre, b: p, fold: .mountain, note: "ridge"))
-        }
-        let k = poly.count
-        for i in 0..<k {
-            let p = poly[i], q = poly[(i + 1) % k]
-            let dx = q.x - p.x, dy = q.y - p.y
-            let t = ((centre.x - p.x) * dx + (centre.y - p.y) * dy) / (dx * dx + dy * dy)
-            let foot = Point(x: p.x + t * dx, y: p.y + t * dy)
-            out.append(Crease(a: centre, b: foot, fold: .valley, note: "hinge"))
-        }
-        return out
-    }
-
     // MARK: - assembly
 
-    static func build(points: [Point], activePairs: [(Int, Int)], leafNames: [String]) -> MoleculeReport {
+    /// Required paper distances between the tree nodes of a face's vertices.
+    /// Returns nil if any vertex is not a leaf node (an injected paper corner).
+    static func requiredMatrix(face: [Int], leafNames: [String], metric: TreeMetric,
+                               scale: Double) -> [[Double]]? {
+        let k = face.count
+        var r = [[Double]](repeating: [Double](repeating: 0, count: k), count: k)
+        for a in 0..<k {
+            guard face[a] < leafNames.count else { return nil }
+            for b in 0..<k where a != b {
+                guard face[b] < leafNames.count else { return nil }
+                let d = metric.dist(leafNames[face[a]], leafNames[face[b]])
+                if !d.isFinite { return nil }
+                r[a][b] = scale * d
+            }
+        }
+        return r
+    }
+
+    static func build(points: [Point], activePairs: [(Int, Int)], leafNames: [String],
+                      tree: OrigamiTree, metric: TreeMetric, scale: Double) -> MoleculeReport {
         var notes: [String] = []
         let (verts, segs, corners, subNotes) = subdivide(points: points, activePairs: activePairs)
         notes.append(contentsOf: subNotes)
+        _ = tree
 
         if hasCrossing(verts, segs) {
             return MoleculeReport(faces: 0, filled: 0, unfilled: [], coverage: 0, creases: [],
@@ -255,25 +250,41 @@ enum Molecule {
 
         for f in fs {
             let poly = f.verts.map { verts[$0] }
-            if f.touchesPaperCorner && !f.allEdgesActive {
-                unfilled.append((f.verts, "face has a paper corner that is not a leaf node; there is no flap to absorb it"))
+
+            // A face is fillable only if it is an axial polygon: every side an active path
+            // and every vertex a leaf of the tree.  A paper corner or a run of paper
+            // boundary means there is no flap to absorb that region, and no molecule
+            // exists for it -- this is the paper-corner problem, not a solver failure.
+            if f.touchesPaperCorner {
+                unfilled.append((f.verts, "a paper corner of this face is not occupied by a leaf node, so no flap absorbs it; it is not an axial polygon"))
                 continue
             }
-            guard let inc = inscribedCentre(poly) else {
-                unfilled.append((f.verts, "no inscribed circle: a \(poly.count)-gon molecule with a gusset is required (not implemented)"))
+            if !f.allEdgesActive {
+                let n = f.kinds.filter { $0 != "active" }.count
+                unfilled.append((f.verts, "\(n) of this face's \(f.kinds.count) sides are paper boundary rather than active paths, so it is not an axial polygon"))
                 continue
             }
-            if inc.residual > 1e-6 {
-                unfilled.append((f.verts, String(format: "not a tangential polygon (residual %.2e): needs a gusset molecule", inc.residual)))
+            guard let req = requiredMatrix(face: f.verts, leafNames: leafNames,
+                                           metric: metric, scale: scale) else {
+                unfilled.append((f.verts, "a vertex of this face is not a leaf node of the tree"))
                 continue
             }
-            creases.append(contentsOf: moleculeCreases(poly, centre: inc.centre))
+            if let bad = UM.axialViolation(polygon: poly, required: req) {
+                unfilled.append((f.verts, "the face does not satisfy the axial-polygon condition: \(bad)"))
+                continue
+            }
+            let m = UM.molecule(polygon: poly, required: req)
+            if !m.ok {
+                unfilled.append((f.verts, m.reason))
+                continue
+            }
+            creases.append(contentsOf: m.creases)
             filled += 1
             filledArea += f.area
         }
 
-        // interior active paths become axial creases; a path that runs along the paper edge
-        // is the edge of the sheet, not a fold
+        // Interior active paths become axial creases; a path that runs along the paper edge
+        // is the edge of the sheet, not a fold.
         func onBoundary(_ p: Point, _ q: Point) -> Bool {
             (abs(p.x) < 1e-9 && abs(q.x) < 1e-9) || (abs(p.x - 1) < 1e-9 && abs(q.x - 1) < 1e-9) ||
             (abs(p.y) < 1e-9 && abs(q.y) < 1e-9) || (abs(p.y - 1) < 1e-9 && abs(q.y - 1) < 1e-9)
@@ -283,11 +294,43 @@ enum Molecule {
             creases.append(Crease(a: verts[s.a], b: verts[s.b], fold: .mountain, note: "axial"))
         }
 
-        _ = leafNames
         return MoleculeReport(faces: fs.count, filled: filled, unfilled: unfilled,
                               coverage: filledArea, creases: creases, interiorVertices: [],
                               kawasakiAllOK: false, mvAssigned: false, mvAllOK: false,
                               crossingActivePaths: false, notes: notes)
+    }
+
+    /// Neighbouring molecules must agree about where their hinge creases meet the axial
+    /// path they share.  When they do not, the shared crease is split by a foot that has no
+    /// partner and the vertex comes out with odd degree, which no flat folding admits.
+    /// This reports such points directly, rather than leaving them to surface as a Kawasaki
+    /// violation, which is a misleading name for an incomplete decomposition.
+    static func hingeMismatches(_ creases: [Crease]) -> [Point] {
+        var ends: [Point] = []
+        for c in creases {
+            for p in [c.a, c.b] where !ends.contains(where: { hypot($0.x - p.x, $0.y - p.y) < 1e-9 }) {
+                ends.append(p)
+            }
+        }
+        var bad: [Point] = []
+        for p in ends {
+            if p.x < 1e-9 || p.x > 1 - 1e-9 || p.y < 1e-9 || p.y > 1 - 1e-9 { continue }
+            var deg = 0
+            for c in creases {
+                let da = hypot(c.a.x - p.x, c.a.y - p.y)
+                let db = hypot(c.b.x - p.x, c.b.y - p.y)
+                if da < 1e-9 || db < 1e-9 { deg += 1; continue }
+                // p strictly inside c splits it, contributing two rays
+                let dx = c.b.x - c.a.x, dy = c.b.y - c.a.y
+                let l2 = dx * dx + dy * dy
+                if l2 < 1e-18 { continue }
+                let t = ((p.x - c.a.x) * dx + (p.y - c.a.y) * dy) / l2
+                if t > 1e-9 && t < 1 - 1e-9,
+                   hypot(c.a.x + t * dx - p.x, c.a.y + t * dy - p.y) < 1e-9 { deg += 2 }
+            }
+            if deg % 2 == 1 { bad.append(p) }
+        }
+        return bad
     }
 
     // MARK: - vertex collection and verification

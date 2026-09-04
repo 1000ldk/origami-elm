@@ -160,7 +160,8 @@ enum Packing {
                          restarts: Int = 240, iters: Int = 6000,
                          seed: UInt64 = 0xC0FFEE,
                          fixed: [Int: Point] = [:],
-                         compactAfter: Bool = true) -> PackingResult {
+                         compactAfter: Bool = true,
+                         cornerBias: Bool = false) -> PackingResult {
         let n = dmat.count
         precondition(n >= 2)
         var rng = Xorshift(seed: seed)
@@ -214,6 +215,26 @@ enum Packing {
                         gx[j] -= c * dx; gy[j] -= c * dy
                     }
                 }
+                // Prefer placements that occupy the paper corners.  This never affects the
+                // scale we certify -- the final verification pass recomputes m from the
+                // returned points -- it only steers the search towards the corner-occupying
+                // basins, which is where the axial polygons of a foldable base live.
+                if cornerBias {
+                    let lam = 0.3 * (1 - t) * (1 - t)
+                    for c in unitCorners {
+                        var bi = -1
+                        var bd = Double.infinity
+                        for i in 0..<n where fixed[i] == nil {
+                            let d = hypot(p[i].x - c.x, p[i].y - c.y)
+                            if d < bd { bd = d; bi = i }
+                        }
+                        if bi >= 0 && bd > 1e-9 {
+                            gx[bi] -= lam * (p[bi].x - c.x) / bd
+                            gy[bi] -= lam * (p[bi].y - c.y) / bd
+                        }
+                    }
+                }
+
                 for i in 0..<n where fixed[i] == nil {
                     p[i].x = min(1.0, max(0.0, p[i].x + eta * gx[i]))
                     p[i].y = min(1.0, max(0.0, p[i].y + eta * gy[i]))
@@ -228,8 +249,7 @@ enum Packing {
 
             // also try a corner-seeded start, which is where good packings usually live
             var c = (0..<n).map { _ in Point(x: rng.unit(), y: rng.unit()) }
-            let corners = [Point(x: 0, y: 0), Point(x: 1, y: 0), Point(x: 1, y: 1), Point(x: 0, y: 1)]
-            for k in 0..<min(4, n) where fixed[k] == nil { c[k] = corners[k] }
+            for k in 0..<min(4, n) where fixed[k] == nil { c[k] = unitCorners[k] }
             for (i, pt) in fixed { c[i] = pt }
             _ = project(&c, dmat, exactScale(c, dmat), iters: 100, rng: &rng, fixed: fixed)
             let s2 = inflate(&c, dmat, steps: 400, rng: &rng, fixed: fixed)
@@ -240,13 +260,25 @@ enum Packing {
             compact(&bestPts, dmat, bestScale, fixed: fixed, iters: 60, rng: &rng)
         }
 
-        // --- verification pass: recompute every constraint from scratch ---
-        let m = exactScale(bestPts, dmat)
+        return verify(points: bestPts, dmat: dmat, leafNames: leafNames, restartsUsed: restarts)
+    }
+
+    /// The paper corners of the unit square, in the order used everywhere else.
+    static let unitCorners = [Point(x: 0, y: 0), Point(x: 1, y: 0),
+                              Point(x: 1, y: 1), Point(x: 0, y: 1)]
+
+    /// Recompute every constraint from scratch for a placement, whatever produced it.
+    /// Any `PackingResult` handed on has been through here, so the scale it reports is a
+    /// certified lower bound, not something the optimiser merely claimed.
+    static func verify(points: [Point], dmat: [[Double]], leafNames: [String],
+                       restartsUsed: Int) -> PackingResult {
+        let n = points.count
+        let m = exactScale(points, dmat)
         var minSlack = Double.infinity
         var active: [(Int, Int)] = []
         for i in 0..<n {
             for j in (i + 1)..<n {
-                let dx = bestPts[i].x - bestPts[j].x, dy = bestPts[i].y - bestPts[j].y
+                let dx = points[i].x - points[j].x, dy = points[i].y - points[j].y
                 let d = (dx * dx + dy * dy).squareRoot()
                 let slack = d - m * dmat[i][j]
                 minSlack = min(minSlack, slack)
@@ -254,12 +286,84 @@ enum Packing {
             }
         }
         var inBox = true
-        for q in bestPts where q.x < -1e-9 || q.x > 1 + 1e-9 || q.y < -1e-9 || q.y > 1 + 1e-9 {
+        for q in points where q.x < -1e-9 || q.x > 1 + 1e-9 || q.y < -1e-9 || q.y > 1 + 1e-9 {
             _ = q; inBox = false
         }
-        return PackingResult(points: bestPts, leafNames: leafNames, scale: m,
+        return PackingResult(points: points, leafNames: leafNames, scale: m,
                              minSlack: minSlack, feasible: inBox && minSlack > -1e-9,
-                             activePairs: active, restartsUsed: restarts)
+                             activePairs: active, restartsUsed: restartsUsed)
+    }
+
+    /// The largest scale at which the pinned points are mutually feasible.
+    ///
+    /// `project` restores the pinned points after each push, so a violation between two of
+    /// them can never be resolved: the solver would silently stop growing instead of
+    /// reporting anything.  Callers check this ceiling first.
+    static func fixedCeiling(_ fixed: [Int: Point], _ dmat: [[Double]]) -> Double {
+        var m = Double.infinity
+        let ks = fixed.keys.sorted()
+        for a in 0..<ks.count {
+            for b in (a + 1)..<ks.count {
+                let i = ks[a], j = ks[b]
+                guard let pi = fixed[i], let pj = fixed[j], dmat[i][j] > 0 else { continue }
+                m = min(m, hypot(pi.x - pj.x, pi.y - pj.y) / dmat[i][j])
+            }
+        }
+        return m
+    }
+
+    /// Pull a leaf onto each paper corner, keeping the scale.
+    ///
+    /// This is the corner treatment that does not touch the tree: the packing is nudged so
+    /// that leaves occupy the corners, and a snap is kept only if it costs less than
+    /// `keepFraction` of the scale.  Corners that could not be occupied are returned, so the
+    /// caller can decide whether to spend a flap on them.
+    static func snapCorners(points: [Point], dmat: [[Double]], keepFraction: Double,
+                            seed: UInt64 = 0x5EED)
+        -> (points: [Point], fixed: [Int: Point], unoccupied: [Point], scale: Double) {
+        var rng = Xorshift(seed: seed)
+        var p = points
+        var fixed: [Int: Point] = [:]
+        var base = exactScale(p, dmat)
+        var unoccupied: [Point] = []
+
+        for c in unitCorners {
+            if p.contains(where: { hypot($0.x - c.x, $0.y - c.y) < 1e-9 }) { continue }
+            var bestI = -1
+            var bestD = Double.infinity
+            for i in p.indices where fixed[i] == nil {
+                let d = hypot(p[i].x - c.x, p[i].y - c.y)
+                if d < bestD { bestD = d; bestI = i }
+            }
+            if bestI < 0 { unoccupied.append(c); continue }
+
+            var trial = p
+            trial[bestI] = c
+            var f = fixed
+            f[bestI] = c
+            if fixedCeiling(f, dmat) < base - 1e-12 { unoccupied.append(c); continue }
+            let worst = project(&trial, dmat, base, iters: 600, rng: &rng, fixed: f)
+            if worst < 1e-10 && exactScale(trial, dmat) >= base * keepFraction {
+                _ = inflate(&trial, dmat, steps: 200, rng: &rng, fixed: f)
+                p = trial
+                fixed = f
+                base = exactScale(p, dmat)
+            } else {
+                unoccupied.append(c)
+            }
+        }
+        return (p, fixed, unoccupied, exactScale(p, dmat))
+    }
+
+    /// Re-project and re-grow a placement that was assembled by hand (corner flaps appended
+    /// to a solved packing), keeping the pinned points where they are.
+    static func polish(points: [Point], dmat: [[Double]], fixed: [Int: Point],
+                       seed: UInt64 = 0x5EED) -> [Point] {
+        var rng = Xorshift(seed: seed)
+        var p = points
+        _ = project(&p, dmat, exactScale(p, dmat), iters: 400, rng: &rng, fixed: fixed)
+        _ = inflate(&p, dmat, steps: 400, rng: &rng, fixed: fixed)
+        return p
     }
 
     static func exactScale(_ p: [Point], _ dmat: [[Double]]) -> Double {
