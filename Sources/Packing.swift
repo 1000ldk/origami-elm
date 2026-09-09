@@ -118,40 +118,160 @@ enum Packing {
         return best
     }
 
-    /// Maximising the scale leaves the configuration under-constrained: only a handful of
-    /// constraints end up tight, so the active-path graph is too sparse to cut the paper into
-    /// polygons.  This pulls every slack pair together, re-projecting to keep feasibility, until
-    /// the packing is as rigid as it can be at the same scale.  The scale never decreases.
-    static func compact(_ p: inout [Point], _ dmat: [[Double]], _ m: Double,
-                        fixed: [Int: Point], iters: Int, rng: inout Xorshift) {
+    /// Constraint projection with two kinds of pair: a `frozen` pair is held *at* its own
+    /// level -- pulled together as well as pushed apart -- while every other pair is pushed
+    /// out to `target`.  Returns the largest remaining residual.
+    static func projectLevels(_ p: inout [Point], _ dmat: [[Double]],
+                              hold: [[Double]], frozen: [[Bool]], target: Double,
+                              iters: Int, rng: inout Xorshift,
+                              fixed: [Int: Point] = [:]) -> Double {
         let n = p.count
-        var best = p
+        var worst = Double.infinity
         for _ in 0..<iters {
-            var q = best
-            // attraction proportional to slack
-            var fx = [Double](repeating: 0, count: n)
-            var fy = [Double](repeating: 0, count: n)
+            worst = 0
             for i in 0..<n {
                 for j in (i + 1)..<n {
-                    let dx = q[i].x - q[j].x, dy = q[i].y - q[j].y
-                    let d = max(hypot(dx, dy), 1e-12)
-                    let slack = d - m * dmat[i][j]
-                    if slack > 0 {
-                        let c = 0.05 * slack / d
-                        fx[i] -= c * dx; fy[i] -= c * dy
-                        fx[j] += c * dx; fy[j] += c * dy
+                    let need = (frozen[i][j] ? hold[i][j] : target) * dmat[i][j]
+                    var dx = p[i].x - p[j].x, dy = p[i].y - p[j].y
+                    var d = (dx * dx + dy * dy).squareRoot()
+                    if d < 1e-12 {
+                        dx = rng.unit() - 0.5; dy = rng.unit() - 0.5
+                        d = max((dx * dx + dy * dy).squareRoot(), 1e-12)
+                    }
+                    let err = need - d
+                    if err > 0 || (frozen[i][j] && err < 0) {
+                        worst = max(worst, abs(err))
+                        let push = (err > 0 ? 0.55 : 0.35) * err / d
+                        p[i].x += push * dx; p[i].y += push * dy
+                        p[j].x -= push * dx; p[j].y -= push * dy
                     }
                 }
             }
-            for i in 0..<n where fixed[i] == nil {
-                q[i].x = min(1, max(0, q[i].x + fx[i]))
-                q[i].y = min(1, max(0, q[i].y + fy[i]))
+            for i in 0..<n {
+                p[i].x = min(1.0, max(0.0, p[i].x))
+                p[i].y = min(1.0, max(0.0, p[i].y))
             }
-            for (i, pt) in fixed { q[i] = pt }
-            let w = project(&q, dmat, m, iters: 400, rng: &rng, fixed: fixed)
-            if w < 1e-10 && exactScale(q, dmat) >= m - 1e-12 { best = q }
+            for (i, pt) in fixed { p[i] = pt }
+            if worst < 1e-12 { break }
         }
-        p = best
+        return worst
+    }
+
+    /// Rigidification: lexicographic maximisation of the ratios.
+    ///
+    /// Maximising m only pins the pairs that are binding *at* m.  Everything else is left
+    /// slack, so the active-path graph is sparse, the faces of the subdivision come out
+    /// huge, and a face with no molecule is a face the crease pattern cannot use.  The cure
+    /// is to keep going after m: freeze the binding pairs at the level they reached, pull
+    /// in whatever is within `snap` of touching (a near-miss is an active path the solver
+    /// merely failed to close), then maximise the smallest ratio among the pairs that are
+    /// still free, freeze what becomes binding, and repeat.
+    ///
+    /// Two things are guaranteed by construction, and both are re-checked by `verify`:
+    ///   * a frozen pair is held at its own level, so no active path is lost, and
+    ///   * nothing is ever accepted that drops the certified scale.
+    /// So the returned placement is at least as good as the one handed in, in the
+    /// lexicographic order (m, then the next smallest ratio, and so on).
+    static func rigidify(points: [Point], dmat: [[Double]], fixed: [Int: Point],
+                         rounds: Int = 8, snap: Double = 1e-2, seed: UInt64 = 0x816D)
+        -> (points: [Point], levels: [(level: Double, binding: Int)]) {
+        let n = points.count
+        var rng = Xorshift(seed: seed)
+        var p = points
+        let scaleFloor = exactScale(p, dmat)
+
+        func ratio(_ q: [Point], _ i: Int, _ j: Int) -> Double {
+            if dmat[i][j] <= 0 { return Double.infinity }
+            return hypot(q[i].x - q[j].x, q[i].y - q[j].y) / dmat[i][j]
+        }
+
+        var frozen = [[Bool]](repeating: [Bool](repeating: false, count: n), count: n)
+        var hold = [[Double]](repeating: [Double](repeating: 0, count: n), count: n)
+        var levels: [(level: Double, binding: Int)] = []
+
+        for _ in 0..<rounds {
+            var level = Double.infinity
+            for i in 0..<n {
+                for j in (i + 1)..<n where !frozen[i][j] {
+                    level = Swift.min(level, ratio(p, i, j))
+                }
+            }
+            if !level.isFinite { break }        // every pair is frozen; nothing left to do
+
+            // (1) snap the near-misses onto this level, if that costs no scale
+            var cand = frozen
+            var near = 0
+            for i in 0..<n {
+                for j in (i + 1)..<n where !frozen[i][j] && ratio(p, i, j) <= level * (1 + snap) {
+                    cand[i][j] = true
+                    cand[j][i] = true
+                    near += 1
+                }
+            }
+            var newHold = hold
+            for i in 0..<n {
+                for j in (i + 1)..<n where cand[i][j] && !frozen[i][j] {
+                    newHold[i][j] = level
+                    newHold[j][i] = level
+                }
+            }
+            var trial = p
+            let w = projectLevels(&trial, dmat, hold: newHold, frozen: cand, target: level,
+                                  iters: 900, rng: &rng, fixed: fixed)
+            if near > 0 && w < 1e-9 && exactScale(trial, dmat) >= scaleFloor - 1e-12 {
+                p = trial
+                frozen = cand
+                hold = newHold
+            } else {
+                // the snap did not work out; freeze only what is genuinely binding
+                var k = 0
+                for i in 0..<n {
+                    for j in (i + 1)..<n where !frozen[i][j] && ratio(p, i, j) <= level * (1 + 1e-7) {
+                        frozen[i][j] = true
+                        frozen[j][i] = true
+                        hold[i][j] = level
+                        hold[j][i] = level
+                        k += 1
+                    }
+                }
+                if k == 0 { break }
+            }
+            var count = 0
+            for i in 0..<n {
+                for j in (i + 1)..<n where frozen[i][j] { count += 1 }
+            }
+            levels.append((level, count))
+
+            // (2) with those held, push whatever is still free as high as it will go
+            var best = p
+            var bestLevel = level
+            var step = 0.05
+            var tries = 0
+            while step > 1e-4 && tries < 200 {
+                tries += 1
+                let target = bestLevel * (1 + step)
+                var q = best
+                let residual = projectLevels(&q, dmat, hold: hold, frozen: frozen, target: target,
+                                             iters: 600, rng: &rng, fixed: fixed)
+                if residual < 1e-9 && exactScale(q, dmat) >= scaleFloor - 1e-12 {
+                    var lv = Double.infinity
+                    for i in 0..<n {
+                        for j in (i + 1)..<n where !frozen[i][j] {
+                            lv = Swift.min(lv, ratio(q, i, j))
+                        }
+                    }
+                    if lv > bestLevel + 1e-12 {
+                        best = q
+                        bestLevel = lv
+                        step = Swift.min(step * 1.3, 0.1)
+                        continue
+                    }
+                }
+                step *= 0.5
+            }
+            p = best
+        }
+        return (p, levels)
     }
 
     /// dmat[i][j] = required tree distance between leaves i and j (unscaled).
@@ -160,7 +280,6 @@ enum Packing {
                          restarts: Int = 240, iters: Int = 6000,
                          seed: UInt64 = 0xC0FFEE,
                          fixed: [Int: Point] = [:],
-                         compactAfter: Bool = true,
                          cornerBias: Bool = false) -> PackingResult {
         let n = dmat.count
         precondition(n >= 2)
@@ -254,10 +373,6 @@ enum Packing {
             _ = project(&c, dmat, exactScale(c, dmat), iters: 100, rng: &rng, fixed: fixed)
             let s2 = inflate(&c, dmat, steps: 400, rng: &rng, fixed: fixed)
             if s2 > bestScale { bestScale = s2; bestPts = c }
-        }
-
-        if compactAfter && bestScale > 0 {
-            compact(&bestPts, dmat, bestScale, fixed: fixed, iters: 60, rng: &rng)
         }
 
         return verify(points: bestPts, dmat: dmat, leafNames: leafNames, restartsUsed: restarts)
