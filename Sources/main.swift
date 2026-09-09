@@ -139,8 +139,7 @@ var dmat = distanceMatrix(tree, leaves)
 
 var pack = Packing.optimise(dmat: dmat, leafNames: leaves,
                             restarts: opts.restarts, iters: 900, seed: 0x5EED,
-                            fixed: [:], compactAfter: opts.compact,
-                            cornerBias: opts.corners != .none)
+                            fixed: [:], cornerBias: opts.corners != .none)
 
 // ---------------------------------------------------------------- corners
 //
@@ -234,6 +233,30 @@ if !unoccupied.isEmpty {
         say("- tree check after adding corner flaps: **\(recheck.ok ? "OK" : "FAILED")** — \(recheck.message)")
         pack = after
         cornerFixed = fixed
+    }
+}
+
+// ---------------------------------------------------------------- rigidification
+//
+// Maximising m pins only the pairs that are binding at m.  Everything else is free to
+// rattle, and a rattling leaf is a leaf with no active path to it, so the face it sits in
+// has no molecule.  The lexicographic refinement holds the binding pairs exactly where they
+// are, pulls near-misses into contact, and then maximises the smallest ratio that is still
+// free -- repeatedly.  It cannot cost scale, and the result is re-verified from scratch
+// before it is accepted, so it is on by default.
+if opts.rigid && pack.feasible && leaves.count >= 3 {
+    let before = pack.activePairs.count
+    let refined = Packing.rigidify(points: pack.points, dmat: dmat, fixed: cornerFixed)
+    let after = Packing.verify(points: refined.points, dmat: dmat, leafNames: leaves,
+                               restartsUsed: opts.restarts)
+    if after.feasible && after.scale >= pack.scale - 1e-12 && after.activePairs.count >= before {
+        let levels = refined.levels.prefix(6)
+            .map { "\(fmt($0.level, 6)) (\($0.binding))" }
+            .joined(separator: ", ")
+        pack = after
+        say("- rigidification (lexicographic): active paths \(before) -> \(after.activePairs.count) at the same scale; levels and cumulative binding pairs: \(levels)")
+    } else {
+        say("- rigidification: refused — the refined placement was not an improvement, so the original stands")
     }
 }
 

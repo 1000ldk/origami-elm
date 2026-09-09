@@ -27,23 +27,44 @@
 // and because the offset of a side shrinks at exactly the rate c_i + c_(i+1), the
 // identity |p_i(t) - p_j(t)| == R_ij(t) is preserved for adjacent pairs.  That identity
 // is the algorithm's invariant, and it is re-checked at the top of every recursion: if
-// it ever fails, the face is one whose reduction is not driven by contraction alone and
-// needs the general river molecule, which is reported rather than faked.
+// it ever fails, the reduction has run past a branch node, and the face is reported
+// rather than filled with something that does not fold.
 //
 // EVENTS
 //   contraction: a side reaches zero length -- two adjacent vertices merge, the ridge
 //                traces meet, and a hinge crease drops from the meeting point
 //                perpendicular to the side's *base* segment.
-//   splitting:   a non-adjacent pair reaches |p_i - p_j| == R_ij -- a gusset (river)
-//                appears.  Detected exactly, and reported: splitting the polygon into
-//                two independent sub-polygons is NOT correct in general, because the two
-//                sub-molecules then drop their hinges onto the new edge at different
-//                points (they correspond to different branch nodes of the tree), which
-//                produces odd-degree vertices.  See README.
+//   splitting:   a non-adjacent pair reaches |p_i - p_j| == R_ij -- a gusset appears.
+//                The polygon is cut in two along it and each half is reduced on its own.
+//   degenerate:  the reduced polygon flattens onto a line.  Nothing is left but the
+//                active path itself, which is the river crease, and the face is done.
+//
+// RIVERS
+//
+// A river is a tree edge between two branch nodes, and it is what makes the two halves of
+// a gusset disagree.  Each half only knows the branch nodes of its own vertices, so when a
+// river runs along the gusset, each half drops a hinge where *it* branches, the other half
+// has nothing there, and the gusset ends up with a crease that has no partner -- an
+// odd-degree vertex, which no flat folding admits.
+//
+// The cure is to carry the river across: a branch node on the gusset is inserted into the
+// other half as a *collinear vertex*.  Its interior angle is straight, so c = cot(90 deg)
+// = 0 and it consumes no tree length -- exactly right for a river node, which is a fixed
+// point of the tree, not a shrinking flap -- and it insets straight inwards along the
+// perpendicular, tracing the level line of that node.  That level line is the partner
+// crease.  Which nodes are needed is seeded from the tree and then closed up by iterating
+// until both sides land their creases on the gusset at the same points.
+//
+// The same node also has to be honoured where it is consumed: when a flap runs out exactly
+// at a river node, the node's level line turns at the ridge and carries on into the
+// neighbouring region, perpendicular to that region's axial base.  Without that arm the
+// merge point comes out with odd degree.
 //
 // Specialising the loop: a triangle collapses to its incentre in one event -- the rabbit
-// ear -- and a square to its centre -- the preliminary-base molecule.  Both are recovered
-// exactly, so this file subsumes the tangential-polygon molecule it replaces.
+// ear -- and a square to its centre -- the preliminary-base molecule.  A rectangle whose
+// short sides are two branch nodes flattens onto a segment -- the classical gusset (river)
+// molecule.  All are recovered exactly, so this file subsumes the tangential-polygon
+// molecule it replaces.
 
 import Foundation
 
@@ -132,13 +153,47 @@ enum UM {
 
     // MARK: - the inset recursion
 
+    /// Signed area of a polygon.  Zero, to numerical tolerance, means the reduced polygon
+    /// has flattened onto a line: there is no paper left in it, only the active path.
+    static func area(_ p: [Point]) -> Double {
+        var a = 0.0
+        for i in 0..<p.count {
+            let q = p[i], r = p[(i + 1) % p.count]
+            a += q.x * r.y - r.x * q.y
+        }
+        return a / 2
+    }
+
+    /// A reduced polygon with no area left is a bare active path: the remaining tree path,
+    /// laid out along a segment.  That segment is a crease -- the river -- and the face is
+    /// finished.  This is the terminal case of the gusset (river) molecule: a rectangle
+    /// whose two short sides are the flaps of two branch nodes reduces to exactly this,
+    /// and the segment is the river between them.
+    static func emitSegment(_ pts: [Point], into creases: inout [Crease]) {
+        var best = (0, 1)
+        var bestLen = -1.0
+        for i in 0..<pts.count {
+            for j in (i + 1)..<pts.count {
+                let d = len(sub(pts[i], pts[j]))
+                if d > bestLen { bestLen = d; best = (i, j) }
+            }
+        }
+        if bestLen > 1e-9 {
+            creases.append(Crease(a: pts[best.0], b: pts[best.1], fold: .mountain, note: "river"))
+        }
+    }
+
     /// `R[k][l]` is the required paper distance between polygon positions k and l.
     /// `base[i]` is the segment side i was born on, so a hinge always drops to the
     /// original axial edge rather than to the current inset line.
     static func inset(pts: [Point], base: [(Point, Point)], R: [[Double]],
                       depth: Int, into creases: inout [Crease]) -> (ok: Bool, reason: String) {
         let n = pts.count
-        if n < 3 { return (true, "") }
+        if n < 2 { return (true, "") }
+        if n == 2 || abs(area(pts)) < 1e-12 {
+            emitSegment(pts, into: &creases)
+            return (true, "")
+        }
         if depth > 64 { return (false, "the inset did not terminate within 64 events") }
         guard isConvex(pts) else {
             return (false, "the reduced polygon is reflex; the universal molecule is defined for convex axial polygons")
@@ -148,12 +203,14 @@ enum UM {
         }
 
         // Invariant: every side of the reduced polygon is still exactly its reduced tree
-        // path.  Failure means a river/gusset is needed, not that the geometry is wrong.
+        // path.  With rivers carried along (see the splitting event below) this holds by
+        // construction; a failure means the reduction ran past a branch node, and the face
+        // is reported rather than filled with something that does not fold.
         for i in 0..<n {
             let j = (i + 1) % n
             let g = len(sub(pts[i], pts[j]))
             if abs(g - R[i][j]) > 1e-7 {
-                return (false, "reduced side \(i)-\(j) measures \(fmt(g)) but its reduced tree path is \(fmt(R[i][j])); the contraction is not tree-consistent, so this face needs a river (gusset) molecule, which is not implemented")
+                return (false, "reduced side \(i)-\(j) measures \(fmt(g)) but its reduced tree path is \(fmt(R[i][j])); the contraction ran past a branch node, so this face cannot be reduced")
             }
         }
 
@@ -168,10 +225,38 @@ enum UM {
                 if t < tBest - 1e-12 { tBest = t; kind = "contract"; ev = (i, j) }
             }
         }
+
+        /// A pair whose in-between vertices already lie on the segment does not cut the
+        /// polygon in two: one "half" contains no paper.  Such a pair is permanently tight
+        /// -- it is a straight run of active path, which is what a river carried onto a
+        /// gusset looks like -- and is not a splitting event.
+        func halvesHaveArea(_ i: Int, _ j: Int, _ t: Double) -> Bool {
+            var q: [Point] = []
+            for k in 0..<n { q.append(add(pts[k], mul(bs[k], t))) }
+            var loops: [[Int]] = []
+            var left: [Int] = []
+            for k in i...j { left.append(k) }
+            var right: [Int] = []
+            for k in j..<n { right.append(k) }
+            for k in 0...i { right.append(k) }
+            loops.append(left)
+            loops.append(right)
+            for idx in loops {
+                var a = 0.0
+                for x in 0..<idx.count {
+                    let p1 = q[idx[x]], p2 = q[idx[(x + 1) % idx.count]]
+                    a += p1.x * p2.y - p2.x * p1.y
+                }
+                if abs(a / 2) < 1e-12 { return false }
+            }
+            return true
+        }
+
         for i in 0..<n {
             for j in (i + 1)..<n where (j - i) % n != 1 && (i - j + n) % n != 1 {
                 if let t = splitTime(u: sub(pts[i], pts[j]), w: sub(bs[i], bs[j]),
-                                     K: R[i][j], c: cs[i] + cs[j]), t < tBest - 1e-9 {
+                                     K: R[i][j], c: cs[i] + cs[j]),
+                   t < tBest - 1e-9, halvesHaveArea(i, j, t) {
                     tBest = t; kind = "split"; ev = (i, j)
                 }
             }
@@ -193,48 +278,144 @@ enum UM {
         if kind == "split" {
             // A gusset: the path between two non-adjacent vertices has become tight, so it
             // is now an active path and cuts the polygon in two.  Each half is again an
-            // axial polygon, at elevation tBest rather than 0, and is reduced on its own.
+            // axial polygon, at elevation tBest rather than 0.
             //
-            // This is right exactly when the two halves put their hinges on the gusset at
-            // the same point.  They do when the two halves' median tree nodes agree -- a
-            // star tree, for instance, where every median is the single branch node.  They
-            // do not when a river runs along the gusset, because then the halves land on
-            // *different* branch nodes of that river and each foot has no partner.  Rather
-            // than guess, the molecule is built and then checked: see `molecule`, which
-            // refuses a face whose interior vertices come out odd or fail Kawasaki.
+            // THE RIVER.  The two halves are only independent when they agree about where
+            // their creases meet the gusset they share.  They do when the tree branches at
+            // the same point from both sides -- a star tree, where every median is the one
+            // branch node.  They do not when a river runs along the gusset: then each half
+            // branches at a node the other does not have, drops its hinge there, and the
+            // gusset picks up a crease with no partner on the other side (an odd-degree
+            // vertex, which no flat folding admits).
+            //
+            // The fix is to carry the river along: a branch node on the gusset becomes a
+            // *collinear vertex* of the other half's polygon.  Its angle is straight, so it
+            // consumes no tree length (c = cot(90 deg) = 0) -- correct, because a river node
+            // is a fixed point of the tree -- and it insets straight into the half along the
+            // perpendicular, which is exactly the level line of that node.  That is the
+            // partner crease the gusset was missing.
+            //
+            // Which nodes are needed is seeded from the tree (the attach point of every
+            // vertex of the other half) and then closed up by iteration: build both halves,
+            // look at where each one actually lands creases on the gusset, and give the
+            // other half a vertex there, until the two sides agree.
             let (i, j) = ev
             let gusset = (moved[i], moved[j])
-            creases.append(Crease(a: moved[i], b: moved[j], fold: .valley, note: "gusset"))
+            let L = rr[i][j]
+            let u = mul(sub(moved[j], moved[i]), 1 / L)
+
+            // where the tree path from vertex k joins the gusset, measured from moved[i]
+            func attach(_ k: Int) -> Double { (rr[i][j] + rr[i][k] - rr[j][k]) / 2 }
 
             var leftIdx: [Int] = []
-            var leftBase: [(Point, Point)] = []
             for k in i...j { leftIdx.append(k) }
-            for k in i..<j { leftBase.append(base[k]) }
-            leftBase.append(gusset)
-
             var rightIdx: [Int] = []
-            var rightBase: [(Point, Point)] = []
             for k in j..<n { rightIdx.append(k) }
             for k in 0...i { rightIdx.append(k) }
-            for k in j..<n { rightBase.append(base[k]) }
-            for k in 0..<i { rightBase.append(base[k]) }
-            rightBase.append(gusset)
 
-            func slice(_ idx: [Int]) -> (pts: [Point], R: [[Double]]) {
-                var p: [Point] = []
-                var r = [[Double]](repeating: [Double](repeating: 0, count: idx.count),
-                                   count: idx.count)
-                for (a, ka) in idx.enumerated() {
-                    p.append(moved[ka])
-                    for (b, kb) in idx.enumerated() where a != b { r[a][b] = rr[ka][kb] }
+            /// One half: its own vertices, then the river nodes placed on the gusset.
+            /// `forward` is true for the half whose vertices run i -> j, so that its gusset
+            /// nodes come back in decreasing distance from i and the polygon stays CCW.
+            func build(_ idx: [Int], _ nodes: [Double], _ forward: Bool)
+                -> (pts: [Point], R: [[Double]], base: [(Point, Point)]) {
+                var p: [Point] = idx.map { moved[$0] }
+                let order = forward ? nodes.sorted(by: >) : nodes.sorted()
+                for a in order { p.append(add(moved[i], mul(u, a))) }
+                let m = idx.count
+                let tot = p.count
+                var r = [[Double]](repeating: [Double](repeating: 0, count: tot), count: tot)
+                for x in 0..<tot {
+                    for y in 0..<tot where x != y {
+                        if x < m && y < m {
+                            r[x][y] = rr[idx[x]][idx[y]]
+                        } else if x >= m && y >= m {
+                            r[x][y] = abs(order[x - m] - order[y - m])
+                        } else {
+                            let vi = x < m ? idx[x] : idx[y]
+                            let a = x < m ? order[y - m] : order[x - m]
+                            if vi == i {
+                                r[x][y] = a
+                            } else if vi == j {
+                                r[x][y] = L - a
+                            } else {
+                                // node -> vertex: along the gusset to where vertex vi joins
+                                // it, then out to vi's own tip
+                                let ak = attach(vi)
+                                r[x][y] = abs(a - ak) + (rr[i][vi] - ak)
+                            }
+                        }
+                    }
                 }
-                return (p, r)
+                var bs2: [(Point, Point)] = []
+                if forward {
+                    for k in i..<j { bs2.append(base[k]) }
+                } else {
+                    for k in j..<n { bs2.append(base[k]) }
+                    for k in 0..<i { bs2.append(base[k]) }
+                }
+                for _ in 0...order.count { bs2.append(gusset) }
+                return (p, r, bs2)
             }
-            let lhs = slice(leftIdx)
-            let rhs = slice(rightIdx)
-            let l = inset(pts: lhs.pts, base: leftBase, R: lhs.R, depth: depth + 1, into: &creases)
-            if !l.ok { return l }
-            return inset(pts: rhs.pts, base: rightBase, R: rhs.R, depth: depth + 1, into: &creases)
+
+            /// Where a half's creases meet the gusset, as distances from moved[i].
+            func landings(_ list: [Crease]) -> [Double] {
+                var out: [Double] = []
+                for c in list {
+                    for q in [c.a, c.b] {
+                        let d = dot(sub(q, moved[i]), u)
+                        if d < 1e-7 || d > L - 1e-7 { continue }
+                        if len(sub(q, add(moved[i], mul(u, d)))) > 1e-9 { continue }
+                        if !out.contains(where: { abs($0 - d) < 1e-7 }) { out.append(d) }
+                    }
+                }
+                return out
+            }
+
+            /// Branch nodes the other half has and this one does not.
+            func seed(_ other: [Int], _ mine: [Int]) -> [Double] {
+                let own = mine.map { attach($0) }
+                var vals: [Double] = []
+                for k in other {
+                    let a = attach(k)
+                    if a < 1e-7 || a > L - 1e-7 { continue }
+                    if own.contains(where: { abs($0 - a) < 1e-7 }) { continue }
+                    if !vals.contains(where: { abs($0 - a) < 1e-7 }) { vals.append(a) }
+                }
+                return vals
+            }
+
+            let leftInner = leftIdx.filter { $0 != i && $0 != j }
+            let rightInner = rightIdx.filter { $0 != i && $0 != j }
+            var leftNodes = seed(rightInner, leftInner)
+            var rightNodes = seed(leftInner, rightInner)
+
+            for _ in 0..<6 {
+                var lc: [Crease] = []
+                var rc: [Crease] = []
+                let lhs = build(leftIdx, leftNodes, true)
+                let l = inset(pts: lhs.pts, base: lhs.base, R: lhs.R, depth: depth + 1, into: &lc)
+                if !l.ok { return l }
+                let rhs = build(rightIdx, rightNodes, false)
+                let r2 = inset(pts: rhs.pts, base: rhs.base, R: rhs.R, depth: depth + 1, into: &rc)
+                if !r2.ok { return r2 }
+                let la = landings(lc)
+                let ra = landings(rc)
+                let addL = ra.filter { a in !la.contains(where: { abs($0 - a) < 1e-7 }) }
+                let addR = la.filter { a in !ra.contains(where: { abs($0 - a) < 1e-7 }) }
+                if addL.isEmpty && addR.isEmpty {
+                    creases.append(Crease(a: moved[i], b: moved[j], fold: .valley, note: "gusset"))
+                    creases.append(contentsOf: lc)
+                    creases.append(contentsOf: rc)
+                    return (true, "")
+                }
+                for a in addL where !leftNodes.contains(where: { abs($0 - a) < 1e-7 }) {
+                    leftNodes.append(a)
+                }
+                for a in addR where !rightNodes.contains(where: { abs($0 - a) < 1e-7 }) {
+                    rightNodes.append(a)
+                }
+            }
+            return (false, "the two sides of the gusset did not agree on where their creases meet it, even after carrying every river node across")
         }
 
         // group maximal runs of vertices that have just become coincident
@@ -274,9 +455,6 @@ enum UM {
         if groups.count == n {
             return (false, "the contraction event at inset \(fmt(tBest)) merged no vertices")
         }
-        if groups.count < 3 {
-            return (false, "the inset collapsed onto a segment rather than a point; this face needs a river (gusset) molecule")
-        }
 
         var keep: [Int] = []
         var nextBase: [(Point, Point)] = []
@@ -286,6 +464,22 @@ enum UM {
             for k in 0..<(g.count - 1) {
                 creases.append(Crease(a: z, b: foot(z, base[g[k]].0, base[g[k]].1),
                                       fold: .valley, note: "hinge"))
+            }
+            // A group that merged at a river node (a collinear vertex, c = 0) is the moment
+            // a flap runs out exactly at that node.  The level line of the node does not
+            // stop at the vanished side: it turns at the ridge and carries on into the
+            // neighbouring region, perpendicular to that region's axial base.  Without this
+            // arm the merge point comes out with odd degree.
+            if g.count > 1 && g.contains(where: { abs(cs[$0]) < 1e-9 }) {
+                if abs(cs[g[g.count - 1]]) > 1e-9 {
+                    creases.append(Crease(a: z, b: foot(z, base[g[g.count - 1]].0, base[g[g.count - 1]].1),
+                                          fold: .valley, note: "hinge"))
+                }
+                if abs(cs[g[0]]) > 1e-9 {
+                    let bprev = base[(g[0] - 1 + n) % n]
+                    creases.append(Crease(a: z, b: foot(z, bprev.0, bprev.1),
+                                          fold: .valley, note: "hinge"))
+                }
             }
             keep.append(g[0])
             nextBase.append(base[g[g.count - 1]])
@@ -321,11 +515,10 @@ enum UM {
         return (creases, true, "")
     }
 
-    /// Does the finished molecule fold?  Every vertex strictly inside the face must have
-    /// even degree and a zero alternating sum, or no flat folding exists however the
-    /// creases are assigned.  This is what lets a gusset be attempted rather than refused:
-    /// the split is performed, and a split that does not work out is caught here.
-    static func interiorInconsistency(_ creases: [Crease], polygon: [Point]) -> String? {
+    /// Every crease endpoint strictly inside the polygon.  These are the points the
+    /// per-vertex theorems have to hold at; a point on the boundary is finished by the
+    /// molecule of the neighbouring face.
+    static func interiorPoints(_ creases: [Crease], polygon: [Point]) -> [Point] {
         let n = polygon.count
         func strictlyInside(_ q: Point) -> Bool {
             for i in 0..<n {
@@ -335,13 +528,23 @@ enum UM {
             }
             return true
         }
-        let split = Molecule.splitAtPoints(creases)
         var pts: [Point] = []
-        for c in split {
+        for c in creases {
             for q in [c.a, c.b] where strictlyInside(q) {
                 if !pts.contains(where: { len(sub($0, q)) < 1e-9 }) { pts.append(q) }
             }
         }
+        return pts
+    }
+
+    /// Does the finished molecule fold?  Every vertex strictly inside the face must have
+    /// even degree and a zero alternating sum, or no flat folding exists however the
+    /// creases are assigned.  Every molecule this file returns has been through here, so a
+    /// filled face is a face whose interior vertices have been checked, not merely one the
+    /// recursion happened to finish.
+    static func interiorInconsistency(_ creases: [Crease], polygon: [Point]) -> String? {
+        let split = Molecule.splitAtPoints(creases)
+        let pts = interiorPoints(split, polygon: polygon)
         for v in pts {
             var angles: [Double] = []
             for c in split {
@@ -349,7 +552,7 @@ enum UM {
                 else if len(sub(c.b, v)) < 1e-9 { angles.append(atan2(c.a.y - v.y, c.a.x - v.x)) }
             }
             if angles.count % 2 == 1 {
-                return "the molecule has an interior vertex of odd degree \(angles.count) at (\(fmt(v.x)), \(fmt(v.y))); the two sides of a gusset put their hinges on it at different points, which needs the general river molecule"
+                return "the molecule has an interior vertex of odd degree \(angles.count) at (\(fmt(v.x)), \(fmt(v.y))); creases meet there that no flat folding admits"
             }
             angles.sort()
             var alt = 0.0
@@ -363,6 +566,57 @@ enum UM {
             }
         }
         return nil
+    }
+
+    /// Add a river node to an axial polygon: a collinear vertex on side (i, i+1), `a` along
+    /// it from vertex i, with the tree distances it needs read off the ones already there
+    /// (the node lies on the path between vertices i and j, so every distance from it
+    /// follows from where the other vertices join that path).
+    ///
+    /// This is how a branch node that only the neighbouring face knows about is carried into
+    /// this one: the node insets straight in, tracing its level line, which is the partner
+    /// for the crease the neighbour lands on the path they share.
+    static func withNode(polygon: [Point], required: [[Double]], side i: Int, at a: Double)
+        -> (polygon: [Point], required: [[Double]])? {
+        let n = polygon.count
+        guard n >= 3, i >= 0, i < n, required.count == n else { return nil }
+        let j = (i + 1) % n
+        let L = required[i][j]
+        guard a > 1e-7, a < L - 1e-7 else { return nil }
+        let e = sub(polygon[j], polygon[i])
+        let el = len(e)
+        guard el > 1e-12 else { return nil }
+        let q = add(polygon[i], mul(e, a / el))
+
+        var row = [Double](repeating: 0, count: n)
+        for x in 0..<n {
+            if x == i {
+                row[x] = a
+            } else if x == j {
+                row[x] = L - a
+            } else {
+                let ax = (required[i][j] + required[i][x] - required[j][x]) / 2
+                row[x] = abs(a - ax) + (required[i][x] - ax)
+            }
+        }
+
+        var poly = polygon
+        poly.insert(q, at: i + 1)
+        let m = n + 1
+        var req = [[Double]](repeating: [Double](repeating: 0, count: m), count: m)
+        func old(_ x: Int) -> Int { x <= i ? x : x - 1 }
+        for x in 0..<m {
+            for y in 0..<m where x != y {
+                if x == i + 1 {
+                    req[x][y] = row[old(y)]
+                } else if y == i + 1 {
+                    req[x][y] = row[old(x)]
+                } else {
+                    req[x][y] = required[old(x)][old(y)]
+                }
+            }
+        }
+        return (poly, req)
     }
 
     /// Check that a face really is an axial polygon before trying to fill it.
@@ -437,6 +691,19 @@ extension UM {
                 ok = false
                 detail += "; \(bad)"
             }
+            // and hold it to the same standard as a finished crease pattern: an M/V
+            // assignment that passes Maekawa and the crimp test at every interior vertex
+            let split = Molecule.splitAtPoints(m.creases)
+            let iv = interiorPoints(split, polygon: poly)
+            if iv.isEmpty {
+                ok = false
+                detail += "; no interior vertices at all"
+            } else if Molecule.assignMV(split, vertices: iv) == nil {
+                ok = false
+                detail += "; no M/V assignment over \(iv.count) interior vertices"
+            } else {
+                detail += ", \(iv.count) interior vertices, M/V found"
+            }
             out.append((name, ok, detail))
         }
 
@@ -463,9 +730,10 @@ extension UM {
             expectFill: true, expectEvents: 6, expectCentre: nil)
 
         // 4. a quadrilateral spanning a river: A,B on P (1,1), C,D on Q (1,2), P-Q = 1.
-        //    A gusset event fires and the split is attempted, but the two halves land their
-        //    hinges on different branch nodes of the river, so the check in `molecule`
-        //    rejects it.  It must come out REFUSED, not filled.
+        //    A gusset event fires and a river runs along the gusset, so the two halves
+        //    branch at different points of it.  Carrying the river nodes across as
+        //    collinear vertices is what makes this face fillable; before that it came out
+        //    with two odd-degree vertices, one at each end of the river.
         let th = 75.0 * Double.pi / 180
         let qa = Point(x: 0, y: 0)
         let qb = Point(x: 2, y: 0)
@@ -479,8 +747,8 @@ extension UM {
                      [2.0, 0.0, 3.0, 4.0],
                      [3.0, 3.0, 0.0, 3.0],
                      [4.0, 4.0, 3.0, 0.0]]
-        run("river quad must be refused", [qa, qb, qc, qd], river,
-            expectFill: false, expectEvents: nil, expectCentre: nil)
+        run("gusset with a river along it", [qa, qb, qc, qd], river,
+            expectFill: true, expectEvents: nil, expectCentre: nil)
 
         // 5. a quadrilateral with no inscribed circle whose reduction *is* driven by
         //    contraction alone -- two events, a ridge segment between them.  The old
@@ -529,6 +797,22 @@ extension UM {
         run("star tree, gusset that works", star,
             requiredMatrix(4) { i, j in mm * (leafLen[i] + leafLen[j]) },
             expectFill: true, expectEvents: nil, expectCentre: nil)
+
+        // 7. the classical gusset (river) molecule: a 2 x (2 + r) rectangle whose four
+        //    corners are flaps of length 1, two on P and two on Q, with a river of length r
+        //    between them.  Both short sides contract at once, the polygon flattens onto a
+        //    segment, and that segment IS the river: 4 ridges + 2 hinges + 1 river crease.
+        //    The inset has nothing left to do at that point, which is why the degenerate
+        //    polygon is a terminal case rather than a failure.
+        for r in [0.5, 1.0, 2.0] {
+            let rect = [Point(x: 0, y: 0), Point(x: 2, y: 0),
+                        Point(x: 2, y: 2 + r), Point(x: 0, y: 2 + r)]
+            let req = requiredMatrix(4) { i, j in
+                (i + j == 1 || i + j == 5) ? 2.0 : (2.0 + r)
+            }
+            run("river rectangle (r = \(fmt(r)))", rect, req,
+                expectFill: true, expectEvents: 7, expectCentre: nil)
+        }
 
         return out
     }

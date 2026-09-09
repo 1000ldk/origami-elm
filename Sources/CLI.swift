@@ -14,7 +14,7 @@ struct Options {
     var paperMM = 150.0
     var keepClone = false
     var quiet = false
-    var compact = false
+    var rigid = true
     var corners: CornerPolicy = .auto
     var cornerKeep = 0.98
     var cornerFlapLength: Double? = nil
@@ -61,9 +61,12 @@ enum CLI {
       --root MODULE           force the entry module (default: Main, else inferred)
       --restarts N            packing solver restarts (default 250)
       --paper MM              paper side length used for the centimetre columns (default 150)
-      --compact               after maximising the scale, pull slack pairs together to make the
-                              packing more rigid (experimental: it does not currently increase
-                              the number of binding constraints)
+      --no-rigid              skip the rigidification pass.  By default, once the scale is
+                              certified the packing is refined lexicographically: the binding
+                              pairs are held exactly where they are, near-misses are pulled
+                              into contact, and the smallest ratio among the pairs that are
+                              still free is maximised, over and over.  That costs no scale
+                              and gives the molecule stage more active paths to work with
       --corners auto|flaps|none
                               how to deal with paper corners that no leaf occupies
                               auto  (default): bias the packing towards corner-occupying
@@ -100,7 +103,7 @@ enum CLI {
             case "--root": o.rootHint = next()
             case "--restarts": o.restarts = Int(next() ?? "") ?? o.restarts
             case "--paper": o.paperMM = Double(next() ?? "") ?? o.paperMM
-            case "--compact": o.compact = true
+            case "--no-rigid": o.rigid = false
             case "--corners": o.corners = CornerPolicy(rawValue: next() ?? "") ?? .auto
             case "--corner-keep": o.cornerKeep = Double(next() ?? "") ?? o.cornerKeep
             case "--corner-flaps": o.corners = .flaps

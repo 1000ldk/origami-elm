@@ -54,10 +54,11 @@ swift build -c release     # -> .build/release/origami
 ```sh
 make check
 # => ok   degree-4 crimp test: 8/8 assignments accepted (M=1:4, M=3:4)
-# => ok   rabbit ear (equilateral triangle): 6 creases
-# => ok   square molecule (star4): 8 creases
-# => ok   river quad must be refused: refused as expected — ...
+# => ok   rabbit ear (equilateral triangle): 6 creases, 1 interior vertices, M/V found
+# => ok   square molecule (star4): 8 creases, 1 interior vertices, M/V found
+# => ok   gusset with a river along it: 29 creases, 14 interior vertices, M/V found
 # => ok   non-tangential quad, contraction only: ...
+# => ok   river rectangle (r = 1.000000): 7 creases, 2 interior vertices, M/V found
 # => all self-tests passed
 # => OK: verified crease pattern emitted for examples/star4
 ```
@@ -65,7 +66,9 @@ make check
 これが通れば、ソルバも幾何の検証器も分子生成器も正しく動いています。
 自己テストだけを走らせるなら `./bin/origami --self-test`（リポジトリ不要）。
 既知解のケース（rabbit ear / square molecule / 内接円を持たない四角形）に加えて、
-**gusset が必要な面がきちんと「拒否」されること**も検査しています。
+**river（川）を含む面** — gusset に沿って river が走る四角形と、線分に潰れる
+古典的な gusset 分子（長方形）— も検査します。各ケースは「幾何が通る」だけでなく、
+**全内部頂点で Maekawa と crimp を通す M/V 割り当てが存在すること**まで確認します。
 
 ### 4. 自分のリポジトリを読ませる
 
@@ -117,6 +120,7 @@ open out/report.md out/packing.svg           # Linux なら xdg-open
 | `--corners auto\|flaps\|none` | 紙の隅の扱い（既定 `auto`）。下記参照 |
 | `--corner-keep F` | 隅スナップを採用する最低スケール比（既定 0.98） |
 | `--corner-flap-length L` | 隅フラップ長の上限。実際に使う長さは「スケールを一切下げない最大値」 |
+| `--no-rigid` | 配置の剛性化（辞書式最大化）を止める。既定は有効。下記参照 |
 | `--paper MM` | mm 換算に使う紙の一辺（既定 150） |
 
 ## パイプライン
@@ -127,8 +131,10 @@ Elm sources
   → 依存グラフ → 単一根の重み付き木           TreeBuild.swift
   → Lang の tree theorem（スケール最大化）     Packing.swift
   → 隅の占有（バイアス→スナップ→安全な隅フラップ）Packing.swift / main.swift
+  → 配置の剛性化（辞書式最大化）               Packing.swift
   → active path の平面分割 → axial polygon     Molecule.swift
-  → universal molecule（inset アルゴリズム）   UniversalMolecule.swift
+  → universal molecule（inset + river）        UniversalMolecule.swift
+  → 面をまたぐ river ノードの受け渡し           Molecule.swift
   → 川崎 / 前川 / crimp による全頂点検証       Origami.swift
   → SVG                                       SVG.swift
 ```
@@ -194,12 +200,17 @@ Elm sources
 - 面が axial polygon であること（全辺が active path で長さがちょうど `m · d_T`、対角線が
   `≥ m · d_T`）を、分子を作る前に全面で検査。ここを通らない面は理由付きで未充填にします
 - 分子の inset の不変量 `|p_i − p_j| = R_ij`（隣接対）を再帰の各段で再検査
+- 分子を返す前に、**その面の内部頂点をすべて**検査（偶数次数と川崎）。通らない面は
+  埋めずに理由を出します。river を持ち込む処理が正しく効いたかどうかは、ここで決まります
+- gusset の両側が、共有する path の**同じ点**に折り線を落とすこと（合意するまで反復）
 - 川崎定理（交互和 = 0）を全内部頂点で計算。**ただし全面が埋まったときだけ**。
   面が残っていると、隣の分子が来ないまま hinge の足が axial crease に落ちて次数が奇数になり、
   幾何とは無関係な「川崎違反」が出るためです。未完成の分解ではその旨だけを報告します
 - 前川定理（|M−V| = 2）を全内部頂点で計算
 - M/V 割り当ての平坦折り可能性を crimp 簡約で判定。判定器は degree-4 の教科書解と一致することを
   自己テスト済み。奇数次数の頂点は「平坦折り不可能」として明示的に弾く
+- 自己テストの各分子は、**全内部頂点で前川と crimp を通す M/V 割り当てが実在すること**まで
+  確認します（`--self-test`）
 
 **検証していない**
 
@@ -234,7 +245,17 @@ Elm sources
 → Verified crease pattern emitted
 ```
 
+**river を含む例**（gusset に沿って river が走る四角形、`--self-test` のケース）:
+
+```
+- gusset with a river along it: 29 creases, 14 interior vertices, M/V found
+```
+
+以前は同じ面が「両側の hinge が別の点に落ちる」として拒否されていたものです。
+
 ここまでで、**円配置とその検証・木の抽出は任意の Elm リポジトリで動きます**。
+分子側は、river を含む面（gusset に river が走る面・線分に潰れる面）も埋まるようになり、
+面をまたぐ river も受け渡します。残る主な障害は紙の隅と紙の縁です。
 
 ## 分子の作り方（`UniversalMolecule.swift`）
 
@@ -259,40 +280,80 @@ R_ij(t) = R_ij(0) − t · (c_i + c_j)
 `|p_i(t) − p_j(t)| = R_ij(t)` が**恒等的に保たれます**。これが本アルゴリズムの不変量で、
 再帰の各段の冒頭で再検査しています。
 
-イベントは2種類:
+イベントは3種類:
 
 - **contraction**: 辺が長さ 0 になる。隣接2頂点が併合し、その合流点から、消えた辺の
   *元の* 線分（生まれたときの高さの線分）へ垂線を下ろしたものが hinge crease になります。
   一様 inset なので、共有辺の両側から下ろした足は**構成上必ず一致します**。
 - **splitting（gusset）**: 非隣接対が `|p_i − p_j| = R_ij` に達する。その path が active に
   なるので、多角形をそこで2つに切り、それぞれを（高さ `t` の axial polygon として）再帰で
-  処理します。**やってみて、検証します。**
+  処理します。
+- **degenerate**: 縮小多角形が線分に潰れる。残っているのは active path そのもの、つまり
+  **river** で、それが折り線になって面は完成します。これが古典的な gusset 分子です
+  （短辺が2つの分岐ノードのフラップである長方形は、ちょうどこの形に潰れます）。
 
-  これが正しいのは、両側の部分分子が gusset 上の**同じ点**に hinge を下ろすときです。
-  両側の median（木の分岐ノード）が一致すればそうなります — たとえば**星型の木**なら
-  median は常に唯一の分岐ノードなので必ず一致します。一致しないのは gusset に沿って
-  **river が走る**ときで、両側が river 上の別々の分岐ノードに落ちるため、片側からしか
-  折り線が来ない次数3の頂点ができます。
+## river（川）の扱い
 
-  そこで、分子を作り終えたあと `UM.interiorInconsistency` が**面の内部頂点をすべて検査**し、
-  奇数次数や川崎違反があればその面を未充填にして理由を出します。river を帯として扱う一般の
-  実装は未実装ですが、**gusset が必要な面のうち成立するものは埋まります**。
+**river** は分岐ノード同士を結ぶ木の辺です。gusset で2つに切った両側は、自分の頂点が
+path のどこで合流するかしか知りません。gusset に沿って river が走ると、
+**両側が別々の点に hinge を下ろし**、共有する path に相方のない折り線 —
+すなわち平坦折り不可能な奇数次数の頂点 — ができます。以前のバージョンが
+「river 分子は未実装」として面ごと拒否していたのはこれです。
+
+解決は **river をそのまま持ち込むこと**です。gusset 上の分岐ノードを、反対側の多角形に
+**共線の頂点**として挿入します。その頂点の内角は 180° なので
+
+- `c = cot(90°) = 0` — 木長を消費しません。river のノードは縮むフラップではなく
+  木の固定点なので、これが正しい挙動です
+- inset ではその頂点は gusset に垂直にまっすぐ進む — それがそのノードの**等高線**であり、
+  相方として足りなかった折り線そのものです
+
+どのノードが必要かは木から初期値を作り（反対側の各頂点の合流点）、そのあと
+**両側が gusset 上の同じ点に折り線を落とすまで反復**して確定させます。
+
+同じノードは「消費される側」でも要ります。フラップがちょうど river ノードで尽きる瞬間、
+そのノードの等高線は ridge で折れ曲がって隣の領域へ続きます（その領域の axial 基線に垂直）。
+この腕がないと合流点が奇数次数になります。
+
+river は面もまたぎます。面を横切った river は、その面の境界上に等高線の足を残しますが、
+向かい側の面はそのノードを知りません（自分の頂点が合流する所でしか分岐しない）。そこで
+`Molecule.build` は、**片側だけが折り線を落とした点を反対側の面に `UM.withNode` で
+共線頂点として渡し**、分子を作り直します（これも反復。渡したノードが新しい折り線を
+生むことがあるため）。
 
 三角形は1イベントで内心に潰れて rabbit ear に、正方形は中心に潰れて `Origami.squareMolecule`
 に一致します。つまりこの実装は、置き換えた「内接円を持つ多角形」の分子を**真に含みます**:
-内接円を持たない多角形でも、contraction だけで木と整合的に還元できるものは埋まります。
+内接円を持たない多角形も、river が走る面も埋まります。
+
+## 配置の剛性化（`--no-rigid` で無効化）
+
+スケール最大化は `m` で binding になる対しか固定しません。残りは緩んだままなので、
+active path が疎になり、平面分割の面が大きくなりすぎ、分子の作りようがない面が残ります。
+
+そこで `m` を認定したあと、**辞書式最大化**を行います。
+
+1. binding な対を、いまいる高さに**そのまま固定**する（≥ ではなく = で保持。
+   でないと active path が緩んで消えてしまいます）
+2. 接触まであと `1%` 以内の対を**接触まで引き寄せる**。ニアミスは、ソルバが閉じ損ねた
+   active path です。射影が収束し、かつスケールが落ちないときだけ採用します
+3. まだ自由な対のうち**最小の比を最大化**し、binding になったものを固定して 1 に戻る
+
+固定された対は自分の高さで保たれ、スケールが下がる変更は一切採用しないので、
+**`m` は決して下がりません**（返り値は例によって全制約を再評価して検証します）。
+合成した木での実測では、12葉で active path が 11 → 15、8葉で 6 → 9 に増えました
+（いずれも `m` は不変）。既に剛な配置では何も起きません。
+
+以前の `--compact`（全ての緩んだ対を一律に引き寄せる実験）は binding constraints を
+増やさなかったため、これに置き換えて削除しました。
 
 ## 残っている実装
 
-1. **river 分子**
-   gusset は作って検証しますが、gusset に沿って river が走る面は検証に落ちます
-   （両側が river 上の別々の分岐ノードに hinge を下ろすため）。river を帯として扱う実装が
-   必要です。
-
-2. （副次的）**配置の剛性化**
-   スケール最大化だけでは配置が拘束不足で、active path が疎になり面が大きくなりすぎます。
-   `--compact` を試しましたが binding constraints は増えませんでした（既定オフ、実験扱い）。
-   本来は辞書式最大化（最小比を固定して次の最小比を最大化、を繰り返す）が必要です。
+- **紙の隅と紙の縁**。隅を占有する葉がない面、および辺の一部が紙の縁である面には
+  分子が存在しません（`--corners` で緩和はしますが、無料で足せる隅フラップが無い場合は
+  そのまま未充填になります）。実リポジトリで面が埋まらない主因はいまここです。
+- **gusset の合意反復には上限があります**（面内 6 回、面をまたいで 4 回）。到達しない
+  場合はその面を埋めずに理由を出します。乱択試験では発生していませんが、収束の証明は
+  していません。
 
 ## その他の限界
 

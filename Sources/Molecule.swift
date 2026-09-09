@@ -13,9 +13,10 @@
 //   6. verification        -- Kawasaki / Maekawa / crimp at EVERY interior vertex
 //
 // A face that is not an axial polygon -- because a paper corner or a stretch of the paper
-// boundary bounds it -- has no molecule at all, and a face whose reduction needs a river
-// (gusset) is not implemented.  Such faces are left unfilled and reported; the output is
-// then labelled a partial molecule map, not a crease pattern.
+// boundary bounds it -- has no molecule at all.  Such faces are left unfilled and reported;
+// the output is then labelled a partial molecule map, not a crease pattern.  Faces whose
+// reduction needs a gusset, with or without a river running along it, are filled: see
+// UniversalMolecule.swift.
 //
 // Nothing here fills a face without consulting the tree.  The previous version fitted an
 // inscribed circle to any face, which silently accepted every triangle -- every triangle is
@@ -228,6 +229,23 @@ enum Molecule {
         return r
     }
 
+    /// Is `q` strictly inside one of the polygon's sides?  Returns which side, and how far
+    /// along it the point lies.
+    static func onSide(_ p: [Point], _ q: Point) -> (side: Int, at: Double)? {
+        for k in 0..<p.count {
+            let a = p[k], b = p[(k + 1) % p.count]
+            let d = UM.sub(b, a)
+            let l2 = UM.dot(d, d)
+            if l2 < 1e-18 { continue }
+            let t = UM.dot(UM.sub(q, a), d) / l2
+            if t <= 1e-9 || t >= 1 - 1e-9 { continue }
+            if UM.len(UM.sub(UM.add(a, UM.mul(d, t)), q)) < 1e-9 {
+                return (k, t * l2.squareRoot())
+            }
+        }
+        return nil
+    }
+
     static func build(points: [Point], activePairs: [(Int, Int)], leafNames: [String],
                       tree: OrigamiTree, metric: TreeMetric, scale: Double) -> MoleculeReport {
         var notes: [String] = []
@@ -244,11 +262,15 @@ enum Molecule {
 
         let fs = faces(verts, segs, corners: corners)
         var creases: [Crease] = []
-        var filled = 0
         var filledArea = 0.0
         var unfilled: [(verts: [Int], reason: String)] = []
 
-        for f in fs {
+        // Stage 1: which faces are axial polygons at all, and with what tree distances.
+        var polys = [[Point]](repeating: [], count: fs.count)
+        var reqs = [[[Double]]](repeating: [], count: fs.count)
+        var refused = [String?](repeating: nil, count: fs.count)
+
+        for (fi, f) in fs.enumerated() {
             let poly = f.verts.map { verts[$0] }
 
             // A face is fillable only if it is an axial polygon: every side an active path
@@ -256,31 +278,110 @@ enum Molecule {
             // boundary means there is no flap to absorb that region, and no molecule
             // exists for it -- this is the paper-corner problem, not a solver failure.
             if f.touchesPaperCorner {
-                unfilled.append((f.verts, "a paper corner of this face is not occupied by a leaf node, so no flap absorbs it; it is not an axial polygon"))
+                refused[fi] = "a paper corner of this face is not occupied by a leaf node, so no flap absorbs it; it is not an axial polygon"
                 continue
             }
             if !f.allEdgesActive {
                 let n = f.kinds.filter { $0 != "active" }.count
-                unfilled.append((f.verts, "\(n) of this face's \(f.kinds.count) sides are paper boundary rather than active paths, so it is not an axial polygon"))
+                refused[fi] = "\(n) of this face's \(f.kinds.count) sides are paper boundary rather than active paths, so it is not an axial polygon"
                 continue
             }
             guard let req = requiredMatrix(face: f.verts, leafNames: leafNames,
                                            metric: metric, scale: scale) else {
-                unfilled.append((f.verts, "a vertex of this face is not a leaf node of the tree"))
+                refused[fi] = "a vertex of this face is not a leaf node of the tree"
                 continue
             }
             if let bad = UM.axialViolation(polygon: poly, required: req) {
-                unfilled.append((f.verts, "the face does not satisfy the axial-polygon condition: \(bad)"))
+                refused[fi] = "the face does not satisfy the axial-polygon condition: \(bad)"
                 continue
             }
-            let m = UM.molecule(polygon: poly, required: req)
-            if !m.ok {
-                unfilled.append((f.verts, m.reason))
+            polys[fi] = poly
+            reqs[fi] = req
+        }
+
+        // Stage 2: fill them, carrying river nodes across shared active paths.
+        //
+        // A river that crosses a face leaves the level line of its branch node on the face's
+        // boundary, at a point the face on the other side may know nothing about -- it only
+        // branches where *its* own vertices join the path.  The crease would then have no
+        // partner and the shared path would carry an odd-degree vertex.  So whenever one
+        // face lands a crease on a path and the face across it does not, that node is
+        // carried into the other face as a collinear vertex (UM.withNode) and the face is
+        // rebuilt.  Iterated, because a carried node can land creases of its own.
+        var extra = [[Point]](repeating: [], count: fs.count)
+        var settled = [[Point]](repeating: [], count: fs.count)   // last set that worked
+        var mols = [[Crease]](repeating: [], count: fs.count)
+        var closed = [Bool](repeating: false, count: fs.count)
+        var carried = 0
+
+        for attempt in 0..<4 {
+            for fi in 0..<fs.count where refused[fi] == nil && !closed[fi] {
+                var p = polys[fi]
+                var r = reqs[fi]
+                var ok = true
+                for q in extra[fi] {
+                    guard let s = onSide(p, q),
+                          let aug = UM.withNode(polygon: p, required: r, side: s.side, at: s.at)
+                    else { ok = false; break }
+                    p = aug.polygon
+                    r = aug.required
+                }
+                var m: (creases: [Crease], ok: Bool, reason: String) = ([], false, "")
+                if ok { m = UM.molecule(polygon: p, required: r) }
+                if ok && m.ok {
+                    mols[fi] = m.creases
+                    settled[fi] = extra[fi]
+                } else if attempt == 0 {
+                    refused[fi] = m.reason.isEmpty ? "a river node could not be placed on this face" : m.reason
+                } else {
+                    // the carried nodes made this face unfillable; keep the molecule that
+                    // did work and stop carrying into it
+                    extra[fi] = settled[fi]
+                    closed[fi] = true
+                    notes.append("a river node from a neighbouring face could not be carried into face \(fi); its molecule is the one without it, so the path they share may still disagree")
+                }
+            }
+
+            // where each face lands a crease on its own boundary
+            var landed = [[Point]](repeating: [], count: fs.count)
+            for fi in 0..<fs.count where refused[fi] == nil {
+                for c in mols[fi] {
+                    for q in [c.a, c.b] where onSide(polys[fi], q) != nil {
+                        if !landed[fi].contains(where: { UM.len(UM.sub($0, q)) < 1e-9 }) {
+                            landed[fi].append(q)
+                        }
+                    }
+                }
+            }
+
+            var added = 0
+            for fi in 0..<fs.count where refused[fi] == nil && !closed[fi] {
+                for gi in 0..<fs.count where gi != fi && refused[gi] == nil {
+                    for q in landed[gi] {
+                        if onSide(polys[fi], q) == nil { continue }
+                        if landed[fi].contains(where: { UM.len(UM.sub($0, q)) < 1e-9 }) { continue }
+                        if extra[fi].contains(where: { UM.len(UM.sub($0, q)) < 1e-9 }) { continue }
+                        extra[fi].append(q)
+                        added += 1
+                    }
+                }
+            }
+            carried += added
+            if added == 0 { break }
+        }
+
+        var filled = 0
+        for (fi, f) in fs.enumerated() {
+            if let why = refused[fi] {
+                unfilled.append((f.verts, why))
                 continue
             }
-            creases.append(contentsOf: m.creases)
+            creases.append(contentsOf: mols[fi])
             filled += 1
             filledArea += f.area
+        }
+        if carried > 0 {
+            notes.append("\(carried) river node(s) carried between neighbouring faces so that both sides crease the path they share at the same points")
         }
 
         // Interior active paths become axial creases; a path that runs along the paper edge
@@ -377,8 +478,12 @@ enum Molecule {
 
     /// Backtracking search for an M/V assignment that satisfies Maekawa and the crimp test at
     /// every interior vertex.  Returns nil if no assignment is found within the node budget.
-    static func assignMV(_ creases: [Crease], budget: Int = 4_000_000) -> [Fold]? {
-        let verts = interiorVertices(creases)
+    /// `vertices` overrides which points count as interior; the default (every crease
+    /// endpoint off the paper edge) is right for a whole crease pattern, while a single
+    /// face's molecule has to be judged against that face's own interior.
+    static func assignMV(_ creases: [Crease], vertices: [Point]? = nil,
+                         budget: Int = 4_000_000) -> [Fold]? {
+        let verts = vertices ?? interiorVertices(creases)
         if verts.isEmpty { return creases.map { $0.fold } }
 
         // incidence: for each interior vertex, the creases meeting it with their directions
